@@ -1,4 +1,4 @@
-from sim import RegisterCell, Accumulator, Delay, AwaitCondition
+from sim import RegisterCell, Accumulator, Delay, AwaitCondition, spawn
 
 
 def my_activity(model: "Model", param1):
@@ -26,6 +26,16 @@ def my_other_activity(model: "Model"):
     model.y = model.y.get() / 3
 
 
+def my_decomposing_activity(model: "Model"):
+    if (model.x > 56):
+        model.x = 55
+    spawn(my_other_activity, {})
+    model.x = 57
+    yield Delay(1)
+    model.x = 55
+    yield AwaitCondition(model.y.is_equal_to(10))
+
+
 class Model:
     def __init__(self):
         self.x = RegisterCell("x", 55)
@@ -43,6 +53,7 @@ class Model:
     def get_activity_types(self):
         activity_types = [
             my_activity,
-            my_other_activity
+            my_other_activity,
+            my_decomposing_activity
         ]
         return {x.__name__: x for x in activity_types}
