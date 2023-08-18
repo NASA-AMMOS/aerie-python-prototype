@@ -60,6 +60,16 @@ class EventGraph:
             return left
         return EventGraph.Concurrently(left, right)
 
+    @staticmethod
+    def to_string(event_graph):
+        if type(event_graph) == EventGraph.Empty:
+            return ""
+        if type(event_graph) == EventGraph.Atom:
+            return f"{event_graph.value.topic}={event_graph.value.value}"
+        if type(event_graph) == EventGraph.Sequentially:
+            return f"{EventGraph.to_string(event_graph.prefix)};{EventGraph.to_string(event_graph.suffix)}"
+        if type(event_graph) == EventGraph.Concurrently:
+            return f"{EventGraph.to_string(event_graph.prefix)}|{EventGraph.to_string(event_graph.suffix)}"
 class TaskFrame:
     """
     TODO: This currently is limited to linear chains of Sequentially
@@ -220,6 +230,7 @@ def simulate(plan):
         if resume_time > globals_.elapsed_time and not type(
                 globals_.current_task_frame.event_graph) == EventGraph.Empty:
             globals_.events.append((globals_.elapsed_time, globals_.current_task_frame.event_graph))
+            globals_.current_task_frame.clear()
 
         globals_.elapsed_time = resume_time
 
@@ -241,6 +252,7 @@ def simulate(plan):
                 awaiting_conditions.append((condition, task))
     if not type(globals_.current_task_frame.event_graph) == EventGraph.Empty:
         globals_.events.append((globals_.elapsed_time, globals_.current_task_frame.event_graph))
+        globals_.current_task_frame.clear()
     return sorted(spans, key=lambda x: (x[1], x[2])), list(globals_.events)
 
 

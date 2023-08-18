@@ -27,111 +27,13 @@ def run(model):
         )
     )
 
-    assert sim_events == [
-        (20, Atom(value=Event(topic="x", value=50))),
-        (
-            25,
-            Sequentially(prefix=Atom(value=Event(topic="x", value=50)), suffix=Atom(value=Event(topic="x", value=55))),
-        ),
-        (
-            30,
-            Sequentially(
-                prefix=Sequentially(
-                    prefix=Sequentially(
-                        prefix=Atom(value=Event(topic="x", value=50)), suffix=Atom(value=Event(topic="x", value=55))
-                    ),
-                    suffix=Atom(value=Event(topic="x", value=60)),
-                ),
-                suffix=Atom(value=Event(topic="y", value=10)),
-            ),
-        ),
-        (
-            35,
-            Sequentially(
-                prefix=Sequentially(
-                    prefix=Sequentially(
-                        prefix=Sequentially(
-                            prefix=Sequentially(
-                                prefix=Sequentially(
-                                    prefix=Atom(value=Event(topic="x", value=50)),
-                                    suffix=Atom(value=Event(topic="x", value=55)),
-                                ),
-                                suffix=Atom(value=Event(topic="x", value=60)),
-                            ),
-                            suffix=Atom(value=Event(topic="y", value=10)),
-                        ),
-                        suffix=Atom(value=Event(topic="x", value=55)),
-                    ),
-                    suffix=Atom(value=Event(topic="y", value=9)),
-                ),
-                suffix=Atom(value=Event(topic="y", value=3.0)),
-            ),
-        ),
-        (
-            40,
-            Sequentially(
-                prefix=Sequentially(
-                    prefix=Sequentially(
-                        prefix=Sequentially(
-                            prefix=Sequentially(
-                                prefix=Sequentially(
-                                    prefix=Sequentially(
-                                        prefix=Sequentially(
-                                            prefix=Atom(value=Event(topic="x", value=50)),
-                                            suffix=Atom(value=Event(topic="x", value=55)),
-                                        ),
-                                        suffix=Atom(value=Event(topic="x", value=60)),
-                                    ),
-                                    suffix=Atom(value=Event(topic="y", value=10)),
-                                ),
-                                suffix=Atom(value=Event(topic="x", value=55)),
-                            ),
-                            suffix=Atom(value=Event(topic="y", value=9)),
-                        ),
-                        suffix=Atom(value=Event(topic="y", value=3.0)),
-                    ),
-                    suffix=Atom(value=Event(topic="x", value=57)),
-                ),
-                suffix=Atom(value=Event(topic="y", value=10)),
-            ),
-        ),
-        (
-            41,
-            Sequentially(
-                prefix=Sequentially(
-                    prefix=Sequentially(
-                        prefix=Sequentially(
-                            prefix=Sequentially(
-                                prefix=Sequentially(
-                                    prefix=Sequentially(
-                                        prefix=Sequentially(
-                                            prefix=Sequentially(
-                                                prefix=Sequentially(
-                                                    prefix=Sequentially(
-                                                        prefix=Atom(value=Event(topic="x", value=50)),
-                                                        suffix=Atom(value=Event(topic="x", value=55)),
-                                                    ),
-                                                    suffix=Atom(value=Event(topic="x", value=60)),
-                                                ),
-                                                suffix=Atom(value=Event(topic="y", value=10)),
-                                            ),
-                                            suffix=Atom(value=Event(topic="x", value=55)),
-                                        ),
-                                        suffix=Atom(value=Event(topic="y", value=9)),
-                                    ),
-                                    suffix=Atom(value=Event(topic="y", value=3.0)),
-                                ),
-                                suffix=Atom(value=Event(topic="x", value=57)),
-                            ),
-                            suffix=Atom(value=Event(topic="y", value=10)),
-                        ),
-                        suffix=Atom(value=Event(topic="x", value=55)),
-                    ),
-                    suffix=Atom(value=Event(topic="y", value=9)),
-                ),
-                suffix=Atom(value=Event(topic="y", value=3.0)),
-            ),
-        ),
+    assert [(x, sim.EventGraph.to_string(y)) for x, y in sim_events] == [
+        (20, "x=50"),
+        (25, "x=55"),
+        (30, "x=60;y=10"),
+        (35, "x=55;y=9;y=3.0"),
+        (40, "x=57;y=13"),
+        (41, "x=55;y=10"),
     ]
 
     sim.globals_.events.clear()
@@ -153,7 +55,7 @@ def run(model):
     assert spans == [
         (sim.Directive(type="my_other_activity", start_time=10, args={}), 10, 35),
         (sim.Directive(type="my_activity", start_time=20, args={"param1": 5}), 20, 35),
-        (("my_other_activity", {}), 40, 41),
+        (("my_child_activity", {}), 40, 41),
         (sim.Directive(type="my_decomposing_activity", start_time=40, args={}), 40, 41),
     ]
 
@@ -161,111 +63,39 @@ def run(model):
         "x": [
             (20, 55),
             (25, 50),
-            (25, 50),
-            (30, 55),
-            (30, 50),
             (30, 55),
             (30, 60),
             (35, 60),
-            (35, 50),
-            (35, 55),
-            (35, 60),
-            (35, 60),
             (35, 55),
             (35, 55),
-            (40, 55),
-            (40, 50),
-            (40, 55),
-            (40, 60),
-            (40, 60),
-            (40, 55),
-            (40, 55),
             (40, 55),
             (40, 57),
             (41, 57),
-            (41, 50),
-            (41, 55),
-            (41, 60),
-            (41, 60),
-            (41, 55),
-            (41, 55),
-            (41, 55),
-            (41, 57),
-            (41, 57),
-            (41, 55),
             (41, 55),
         ],
         "y": [
             (20, 0),
             (25, 0),
-            (25, 0),
             (30, 0),
             (30, 0),
-            (30, 0),
-            (30, 0),
-            (35, 10),
-            (35, 10),
-            (35, 10),
-            (35, 10),
             (35, 10),
             (35, 10),
             (35, 9),
             (40, 3.0),
             (40, 3.0),
-            (40, 3.0),
-            (40, 3.0),
-            (40, 10),
-            (40, 10),
-            (40, 9),
-            (40, 3.0),
-            (40, 3.0),
-            (41, 10),
-            (41, 10),
-            (41, 10),
-            (41, 10),
-            (41, 10),
-            (41, 10),
-            (41, 9),
-            (41, 3.0),
-            (41, 3.0),
-            (41, 10),
-            (41, 10),
-            (41, 9),
+            (41, 13),
+            (41, 13),
         ],
         "z": [
             (20, 41),
             (25, 41),
-            (25, 41),
-            (30, 41),
-            (30, 41),
             (30, 41),
             (30, 41),
             (35, 41),
             (35, 41),
             (35, 41),
-            (35, 41),
-            (35, 41),
-            (35, 41),
-            (35, 41),
             (40, 41),
             (40, 41),
-            (40, 41),
-            (40, 41),
-            (40, 41),
-            (40, 41),
-            (40, 41),
-            (40, 41),
-            (40, 41),
-            (41, 41),
-            (41, 41),
-            (41, 41),
-            (41, 41),
-            (41, 41),
-            (41, 41),
-            (41, 41),
-            (41, 41),
-            (41, 41),
-            (41, 41),
             (41, 41),
             (41, 41),
         ],

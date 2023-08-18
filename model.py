@@ -29,11 +29,17 @@ def my_other_activity(model: "Model"):
 def my_decomposing_activity(model: "Model"):
     if model.x.get() > 56:
         model.x = 55
-    spawn(my_other_activity, {})
+    spawn(my_child_activity, {})
     model.x = 57
     yield Delay(1)
     model.x = 55
     yield AwaitCondition(model.y.is_equal_to(10))
+
+
+def my_child_activity(model: "Model"):
+    model.y = 13
+    yield Delay(1)
+    model.y = 10
 
 
 class Model:
