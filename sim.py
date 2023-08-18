@@ -9,7 +9,7 @@ Directive = namedtuple("Directive", "type start_time args")
 Span = namedtuple("Span", "start_time duration")
 Profile = namedtuple("Profile", "name segments")
 Segment = namedtuple("Segment", "start_time value")
-Event = namedtuple("Event", "topic start_time value")
+Event = namedtuple("Event", "topic value")
 
 Delay = namedtuple("Delay", "duration")
 AwaitCondition = namedtuple("AwaitCondition", "condition")
@@ -20,7 +20,8 @@ Completed = namedtuple("Completed", "")
 class Globals:
     def __init__(self):
         self.elapsed_time = 0
-        self.events = TaskFrame()
+        self.events = []  # list of tuples (start_offset, event_graph)
+        self.current_task_frame = TaskFrame()
         self.schedule = []
         self.model = None  # Filled in by register_model
         self.activity_types_by_name = None  # Filled in by register_model
@@ -83,9 +84,12 @@ class TaskFrame:
             if type(rest) is EventGraph.Sequentially:
                 if type(rest.prefix) is EventGraph.Sequentially:
                     rest = EventGraph.sequentially(rest.prefix.prefix, EventGraph.sequentially(rest.prefix.suffix, rest.suffix))
+                    continue
                 elif type(rest.prefix) is EventGraph.Atom:
                     yield rest.prefix.value
                     rest = rest.suffix
+                    continue
+            raise Exception("Unhandled: " + str(rest))
 
 
 
@@ -102,7 +106,8 @@ def register_model(cls):
 
 
 def emit(event):
-    globals_.events.append(event)
+    # TODO: globals_.elapsed_time,
+    globals_.current_task_frame.append(event)
 
 
 def spawn(directive_type, arguments):
@@ -133,13 +138,13 @@ class RegisterCell:
 
     def get(self):
         res = self._initial_value
-        for event in globals_.events:
+        for event in linearize(globals_.events, globals_.current_task_frame):
             if event.topic == self._topic:
                 res = event.value
         return res
 
     def set(self, new_value):
-        emit(Event(self._topic, globals_.elapsed_time, new_value))
+        emit(Event(self._topic, new_value))
 
     def __add__(self, other):
         return self.get() + other
@@ -179,7 +184,7 @@ class Accumulator:
         value = self._initial_value
         rate = self._initial_rate
         previous_event_time = 0
-        for event in globals_.events:
+        for event in linearize(globals_.events, globals_.current_task_frame):
             if event.topic != self._topic:
                 continue
             value += rate * (event.start_time - previous_event_time)
@@ -212,6 +217,10 @@ def simulate(plan):
     while globals_.schedule:
         globals_.schedule = sorted(globals_.schedule, key=lambda x: x[0])
         resume_time, task = globals_.schedule.pop(0)
+        if resume_time > globals_.elapsed_time and not type(
+                globals_.current_task_frame.event_graph) == EventGraph.Empty:
+            globals_.events.append((globals_.elapsed_time, globals_.current_task_frame.event_graph))
+
         globals_.elapsed_time = resume_time
 
         task_status = step(task)
@@ -230,7 +239,20 @@ def simulate(plan):
                 globals_.schedule.insert(0, (globals_.elapsed_time, task))
             else:
                 awaiting_conditions.append((condition, task))
+    if not type(globals_.current_task_frame.event_graph) == EventGraph.Empty:
+        globals_.events.append((globals_.elapsed_time, globals_.current_task_frame.event_graph))
     return sorted(spans, key=lambda x: (x[1], x[2])), list(globals_.events)
+
+
+def linearize(events, current_task_frame):
+    print("linearize")
+    for _, eg in events:
+        tf = TaskFrame()
+        tf.event_graph = eg
+        for x in tf:
+            yield x
+    for x in current_task_frame:
+        yield x
 
 
 def execute(commands):

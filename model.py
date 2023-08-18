@@ -27,7 +27,7 @@ def my_other_activity(model: "Model"):
 
 
 def my_decomposing_activity(model: "Model"):
-    if (model.x > 56):
+    if model.x.get() > 56:
         model.x = 55
     spawn(my_other_activity, {})
     model.x = 57
