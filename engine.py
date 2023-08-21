@@ -190,8 +190,11 @@ class TaskFrame:
         self.branches.append((self.tip, event_graph))
         self.tip = EventGraph.empty()
 
-    def get_current_history(self):
-        res = self.history
+    def get_current_history(self, include_history=True):
+        if include_history:
+            res = self.history
+        else:
+            res = EventGraph.empty()
         for base, _ in self.branches:
             res = EventGraph.sequentially(res, base)
         res = EventGraph.sequentially(res, self.tip)

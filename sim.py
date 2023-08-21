@@ -61,14 +61,20 @@ class Accumulator:
         value = self._initial_value
         rate = self._initial_rate
         previous_event_time = 0
-        for event in EventGraph.iter(EventGraph.filter(sim_engine.current_task_frame.get_current_history(), self._topic)):
-            value += rate * (event.start_time - previous_event_time)
-            previous_event_time = event.start_time
+        for start_offset, event_graph in sim_engine.events:
+            for event in EventGraph.iter(EventGraph.filter(event_graph, self._topic)):
+                value += rate * (event.start_time - previous_event_time)
+                previous_event_time = event.start_time
+                if type(event.value) == Accumulator.SetValue:
+                    value = event.value.new_value
+                if type(event.value) == Accumulator.SetRate:
+                    rate = event.value.new_rate
+        value += rate * (sim_engine.elapsed_time - previous_event_time)
+        for event in EventGraph.iter(EventGraph.filter(sim_engine.current_task_frame.get_current_history(include_history=False), self._topic)):
             if type(event.value) == Accumulator.SetValue:
                 value = event.value.new_value
             if type(event.value) == Accumulator.SetRate:
-                rate = event.value.new_rate
-        value += rate * (sim_engine.elapsed_time - previous_event_time)
+                pass
         return value
 
     def __repr__(self):

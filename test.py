@@ -44,7 +44,7 @@ def run():
     assert compute_profiles(model.Model(), sim_events) == {
         "x": [(0, 55), (20, 50), (25, 55), (30, 60), (35, 55), (40, 57), (41, 55), (50, 98)],
         "y": [(0, 0), (20, 0), (25, 0), (30, 10), (35, 3.0), (40, 13), (41, 10), (50, 10)],
-        "z": [(0, 0), (20, 0), (25, 0), (30, 0), (35, 0), (40, 0), (41, 0), (50, 0)],
+        "z": [(0, 0), (20, 20), (25, 25), (30, 30), (35, 35), (40, 40), (41, 41), (50, 50)],
     }
 
 
@@ -59,6 +59,7 @@ def compute_profiles(model, sim_events):
     for attribute in model.attributes():
         profiles[attribute].append((0, getattr(model, attribute).get()))
     for start_offset, event_graph in sim_events:
+        engine.elapsed_time = start_offset
         engine.events.append((start_offset, event_graph))
         engine.current_task_frame = sim.TaskFrame(history=engine.events)
         for attribute in model.attributes():
