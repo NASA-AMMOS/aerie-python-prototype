@@ -4,9 +4,6 @@ import sim as facade
 
 
 def test_something():
-    run()
-
-def run():
     def register_engine(engine):
         facade.sim_engine = engine
     spans, sim_events = sim.simulate(
@@ -25,11 +22,11 @@ def run():
     assert [(x, sim.EventGraph.to_string(y)) for x, y in sim_events] == [
         (20, "x=50"),
         (25, "x=55"),
-        (30, "(x=60;y=10)"),
-        (35, "(x=55;(y=9;y=3.0))"),
-        (40, "(x=55;(y=13|x=57))"),
-        (41, "(y=10|x=55)"),
-        (50, "((x=100;x=99);x=98)"),
+        (30, "x=60;y=10"),
+        (35, "x=55;y=9;y=3.0"),
+        (40, "x=55;(y=13|x=57)"),
+        (41, "y=10|x=55"),
+        (50, "x=100;x=99;x=98"),
     ]
 
     assert spans == [
