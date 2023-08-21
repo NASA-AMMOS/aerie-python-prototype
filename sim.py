@@ -1,6 +1,6 @@
 from collections import namedtuple
 
-from engine import Event, Delay, AwaitCondition, EventGraph, Call
+from protocol import Delay, AwaitCondition, EventGraph, Call
 
 sim_engine = None
 
@@ -16,12 +16,11 @@ class Register:
     def get(self):
         res = self._initial_value
         for event in EventGraph.iter(EventGraph.filter(sim_engine.current_task_frame.get_current_history(), self._topic)):
-            if event.topic == self._topic:
-                res = event.value
+            res = event.value
         return res
 
     def set(self, new_value):
-        sim_engine.current_task_frame.emit(Event(self._topic, new_value))
+        sim_engine.current_task_frame.emit(self._topic, new_value)
 
     def __add__(self, other):
         return self.get() + other

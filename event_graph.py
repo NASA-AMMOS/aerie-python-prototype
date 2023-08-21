@@ -79,7 +79,7 @@ class EventGraph:
             return event_graph
         if type(event_graph) == EventGraph.Atom:
             if event_graph.value.topic == topic:
-                return event_graph
+                return EventGraph.atom(event_graph.value)
             else:
                 return EventGraph.empty()
         if type(event_graph) == EventGraph.Sequentially:

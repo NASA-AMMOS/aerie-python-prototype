@@ -1,22 +1,25 @@
 import engine as sim
+import incremental_engine as incremental_sim
 import model
 import sim as facade
+from protocol import Plan, Directive
 
 
-def test_something():
+def test_baseline():
     def register_engine(engine):
         facade.sim_engine = engine
+
     spans, sim_events = sim.simulate(
         register_engine,
         model.Model,
-        sim.Plan(
+        Plan(
             [
-                sim.Directive("my_other_activity", 10, {}),
-                sim.Directive("my_activity", 20, {"param1": 5}),
-                sim.Directive("my_decomposing_activity", 40, {}),
-                sim.Directive("caller_activity", 50, {}),
+                Directive("my_other_activity", 10, {}),
+                Directive("my_activity", 20, {"param1": 5}),
+                Directive("my_decomposing_activity", 40, {}),
+                Directive("caller_activity", 50, {}),
             ]
-        )
+        ),
     )
 
     assert [(x, sim.EventGraph.to_string(y)) for x, y in sim_events] == [
@@ -30,12 +33,12 @@ def test_something():
     ]
 
     assert spans == [
-        (sim.Directive(type="my_other_activity", start_time=10, args={}), 10, 35),
-        (sim.Directive(type="my_activity", start_time=20, args={"param1": 5}), 20, 35),
+        (Directive(type="my_other_activity", start_time=10, args={}), 10, 35),
+        (Directive(type="my_activity", start_time=20, args={"param1": 5}), 20, 35),
         (("my_child_activity", {}), 40, 41),
-        (sim.Directive(type="my_decomposing_activity", start_time=40, args={}), 40, 41),
-        (("callee_activity", {}), 50, 50),
-        (sim.Directive(type="caller_activity", start_time=50, args={}), 50, 50),
+        (Directive(type="my_decomposing_activity", start_time=40, args={}), 40, 41),
+        (("callee_activity", {"value": 99}), 50, 50),
+        (Directive(type="caller_activity", start_time=50, args={}), 50, 50),
     ]
 
     assert compute_profiles(model.Model(), sim_events) == {
@@ -64,5 +67,57 @@ def compute_profiles(model, sim_events):
     return profiles
 
 
+def test_incremental():
+    def register_engine(engine):
+        facade.sim_engine = engine
+
+    old_plan = Plan(
+        [
+            Directive("callee_activity", 10, {"value": 1}),
+            Directive("callee_activity", 15, {"value": 2}),
+        ]
+    )
+    old_spans, old_sim_events = sim.simulate(register_engine, model.Model, old_plan)
+
+    expected_spans, expected_sim_events = sim.simulate(
+        register_engine,
+        model.Model,
+        Plan(
+            [
+                Directive("callee_activity", 10, {"value": 1}),
+                Directive("callee_activity", 15, {"value": 3}),  # Changed value only
+            ]
+        ),
+    )
+
+    callee_activity = model.callee_activity
+
+    def error_on_rerun_callee_activity(model: "Model", value):
+        if value == 1:
+            raise Exception("Incremental simulation reran callee_activity with value " + str(value))
+        return callee_activity(model, value)
+
+    def register_engine_with_error_activity(engine):
+        register_engine(engine)
+        engine.activity_types_by_name["callee_activity"] = error_on_rerun_callee_activity
+
+    actual_spans, actual_sim_events = incremental_sim.simulate_incremental(
+        register_engine_with_error_activity,
+        model.Model,
+        Plan(
+            [
+                Directive("callee_activity", 10, {"value": 1}),
+                Directive("callee_activity", 15, {"value": 3}),  # Changed value only
+            ]
+        ),
+        old_plan,
+        old_spans,
+        old_sim_events,
+    )
+
+    assert [(x, sim.EventGraph.to_string(y)) for x, y in actual_sim_events] == [(x, sim.EventGraph.to_string(y)) for x, y in expected_sim_events]
+    assert actual_spans == expected_spans
+
+
 if __name__ == "__main__":
-    test_something()
+    test_baseline()

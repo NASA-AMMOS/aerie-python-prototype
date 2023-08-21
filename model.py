@@ -36,11 +36,12 @@ def my_child_activity(model: "Model"):
 
 def caller_activity(model: "Model"):
     model.x.set(100)
-    yield Call(callee_activity, {})
+    yield Call(callee_activity, {"value": 99})
     model.x.set(98)
 
-def callee_activity(model: "Model"):
-    model.x.set(99)
+
+def callee_activity(model: "Model", value):
+    model.x.set(value)
 
 
 class Model:

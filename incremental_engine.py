@@ -2,10 +2,10 @@
 from collections import namedtuple
 import inspect
 
-from protocol import Completed, Delay, AwaitCondition, Call, Directive, Plan
+from protocol import Completed, Delay, AwaitCondition, Directive, Call, Plan
 from event_graph import EventGraph
 
-Event = namedtuple("Event", "topic value")
+Event = namedtuple("Event", "topic value progeny")
 
 class SimulationEngine:
     def __init__(self):
@@ -93,7 +93,7 @@ class TaskFrame:
         self.branches = []
 
     def emit(self, topic, value):
-        self.tip = EventGraph.sequentially(self.tip, EventGraph.atom(Event(topic, value)))  # TODO get progeny
+        self.tip = EventGraph.sequentially(self.tip, EventGraph.Atom(Event(topic, value, None)))
 
     def spawn(self, event_graph):
         self.branches.append((self.tip, event_graph))
@@ -152,7 +152,6 @@ def simulate(register_engine, model_class, plan):
     engine = SimulationEngine()
     engine.register_model(model_class)
     register_engine(engine)
-
     for directive in plan.directives:
         directive_type = engine.activity_types_by_name[directive.type]
         task = engine.defer(directive_type, directive.start_time, directive.args)
@@ -180,6 +179,33 @@ def simulate(register_engine, model_class, plan):
                 engine.awaiting_conditions.append((condition, task))
     return sorted(engine.spans, key=lambda x: (x[1], x[2])), list(engine.events)
 
+
+def simulate_incremental(register_engine, model_class, new_plan, old_plan, old_spans, old_sim_events):
+    unchanged_directives, deleted_directives, added_directives = diff(old_plan.directives, new_plan.directives)
+    # TODO don't resimulate the whole plan
+    new_spans, new_events = simulate(register_engine, model_class, new_plan)
+    return new_spans, new_events
+
+
+def diff(old_directives, new_directives):
+    old_directives = list(old_directives)
+    new_directives = list(new_directives)
+    unchanged_directives = []
+
+    any_matched = True
+    while any_matched:
+        # TODO use a more efficient diff algorithm
+        any_matched = False
+        for old in old_directives:
+            for new in new_directives:
+                if old == new:
+                    unchanged_directives.append(old)
+                    new_directives.remove(new)
+                    old_directives.remove(old)
+                    any_matched = True
+    deleted_directives = old_directives
+    added_directives = new_directives
+    return unchanged_directives, deleted_directives, added_directives
 
 def make_generator(f, arguments):
     if False:
