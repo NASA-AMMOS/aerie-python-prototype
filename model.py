@@ -27,8 +27,7 @@ def my_other_activity(model: "Model"):
 
 
 def my_decomposing_activity(model: "Model"):
-    if model.x.get() > 56:
-        model.x = 55
+    model.x = 55
     spawn(my_child_activity, {})
     model.x = 57
     yield Delay(1)
@@ -37,6 +36,8 @@ def my_decomposing_activity(model: "Model"):
 
 
 def my_child_activity(model: "Model"):
+    # if model.x.get() != 55:
+    #     raise Exception(f"Precondition not met: {model.x.get()} != 55")
     model.y = 13
     yield Delay(1)
     model.y = 10
