@@ -1,58 +1,53 @@
-from sim import RegisterCell, Accumulator, Delay, AwaitCondition, spawn
+from sim import Register, Accumulator, Delay, AwaitCondition, spawn, Call
 
 
 def my_activity(model: "Model", param1):
-    model.x -= param1
-    print(model.z)
+    model.x.set(model.x.get() - param1)
     yield Delay(5)
-    model.x += param1
-    print(model.z)
+    model.x.set(model.x.get() + param1)
     yield Delay(5)
-    model.x += param1
-    print(model.z)
+    model.x.set(model.x.get() + param1)
     yield Delay(5)
-    print(model.z)
-    model.x -= param1
+    model.x.set(model.x.get() - param1)
 
 
 def my_other_activity(model: "Model"):
-    print(model.x.get())
     yield AwaitCondition(model.x > 56)
-    print(model.x.get())
-    model.y = 10
+    model.y.set(10)
     yield AwaitCondition(model.x < 56)
-    print(model.x.get())
-    model.y = 9
-    model.y = model.y.get() / 3
+    model.y.set(9)
+    model.y.set(model.y.get() / 3)
 
 
 def my_decomposing_activity(model: "Model"):
-    model.x = 55
+    model.x.set(55)
     spawn(my_child_activity, {})
-    model.x = 57
+    model.x.set(57)
     yield Delay(1)
-    model.x = 55
+    model.x.set(55)
     yield AwaitCondition(model.y.is_equal_to(10))
 
 
 def my_child_activity(model: "Model"):
-    # if model.x.get() != 55:
-    #     raise Exception(f"Precondition not met: {model.x.get()} != 55")
-    model.y = 13
+    model.y.set(13)
     yield Delay(1)
-    model.y = 10
+    model.y.set(10)
+
+
+def caller_activity(model: "Model"):
+    model.x.set(100)
+    yield Call(callee_activity, {})
+    model.x.set(98)
+
+def callee_activity(model: "Model"):
+    model.x.set(99)
 
 
 class Model:
     def __init__(self):
-        self.x = RegisterCell("x", 55)
-        self.y = RegisterCell("y", 0)
+        self.x = Register("x", 55)
+        self.y = Register("y", 0)
         self.z = Accumulator("z", 0, 1)
-
-        def __setattr__(self, key, value):
-            getattr(self, key).set(value)
-
-        Model.__setattr__ = __setattr__
 
     def attributes(self):
         return [x for x in self.__dict__ if not x.startswith("_")]
@@ -61,6 +56,8 @@ class Model:
         activity_types = [
             my_activity,
             my_other_activity,
-            my_decomposing_activity
+            my_decomposing_activity,
+            caller_activity,
+            callee_activity
         ]
         return {x.__name__: x for x in activity_types}
