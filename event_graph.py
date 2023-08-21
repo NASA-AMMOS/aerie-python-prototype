@@ -57,10 +57,10 @@ class EventGraph:
         while True:
             if type(rest) is EventGraph.Empty:
                 return
-            if type(rest) is EventGraph.Atom:
+            elif type(rest) is EventGraph.Atom:
                 yield rest.value
                 return
-            if type(rest) is EventGraph.Sequentially:
+            elif type(rest) is EventGraph.Sequentially:
                 if type(rest.prefix) is EventGraph.Sequentially:
                     rest = EventGraph.sequentially(
                         rest.prefix.prefix, EventGraph.sequentially(rest.prefix.suffix, rest.suffix)
@@ -70,20 +70,37 @@ class EventGraph:
                     yield rest.prefix.value
                     rest = rest.suffix
                     continue
-            if type(rest) is EventGraph.Concurrently:
+            elif type(rest) is EventGraph.Concurrently:
                 raise ValueError("Cannot iterate across a concurrent node: " + EventGraph.to_string(rest))
+            else:
+                raise ValueError("Wat. " + str(rest))
 
     @staticmethod
-    def filter(event_graph, topic):
+    def filter(event_graph, topics):
         if type(event_graph) == EventGraph.Empty:
             return event_graph
         if type(event_graph) == EventGraph.Atom:
-            if event_graph.value.topic == topic:
+            if event_graph.value.topic in topics:
                 return EventGraph.atom(event_graph.value)
             else:
                 return EventGraph.empty()
         if type(event_graph) == EventGraph.Sequentially:
-            return EventGraph.sequentially(EventGraph.filter(event_graph.prefix, topic), EventGraph.filter(event_graph.suffix, topic))
+            return EventGraph.sequentially(EventGraph.filter(event_graph.prefix, topics), EventGraph.filter(event_graph.suffix, topics))
         if type(event_graph) == EventGraph.Concurrently:
-            return EventGraph.concurrently(EventGraph.filter(event_graph.left, topic), EventGraph.filter(event_graph.right, topic))
+            return EventGraph.concurrently(EventGraph.filter(event_graph.left, topics), EventGraph.filter(event_graph.right, topics))
+        raise ValueError("Not an event_graph: " + str(event_graph))
+
+    @staticmethod
+    def filter_p(event_graph, predicate):
+        if type(event_graph) == EventGraph.Empty:
+            return event_graph
+        if type(event_graph) == EventGraph.Atom:
+            if predicate(event_graph.value):
+                return EventGraph.atom(event_graph.value)
+            else:
+                return EventGraph.empty()
+        if type(event_graph) == EventGraph.Sequentially:
+            return EventGraph.sequentially(EventGraph.filter_p(event_graph.prefix, predicate), EventGraph.filter_p(event_graph.suffix, predicate))
+        if type(event_graph) == EventGraph.Concurrently:
+            return EventGraph.concurrently(EventGraph.filter_p(event_graph.left, predicate), EventGraph.filter_p(event_graph.right, predicate))
         raise ValueError("Not an event_graph: " + str(event_graph))

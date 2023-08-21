@@ -11,7 +11,7 @@ class SimulationEngine:
     def __init__(self):
         self.elapsed_time = 0
         self.events = []  # list of tuples (start_offset, event_graph)
-        self.current_task_frame = TaskFrame()
+        self.current_task_frame = TaskFrame(self.elapsed_time)
         self.schedule = JobSchedule()
         self.model = None  # Filled in by register_model
         self.activity_types_by_name = None  # Filled in by register_model
@@ -47,7 +47,7 @@ class SimulationEngine:
         return task
 
     def step(self, task):
-        self.current_task_frame = TaskFrame(history=self.current_task_frame.get_current_history())
+        self.current_task_frame = TaskFrame(self.elapsed_time, history=self.current_task_frame.get_visible_history())
         try:
             task_status = next(task)
         except StopIteration:
@@ -82,32 +82,36 @@ class SimulationEngine:
 class TaskFrame:
     Branch = namedtuple("Branch", "base event_graph")
 
-    def __init__(self, history=EventGraph.empty()):
+    def __init__(self, elapsed_time, history=None):
+        if history is None:
+            history = []
         self.tip = EventGraph.empty()
-        if type(history) == list:
-            self.history = EventGraph.empty()
-            for _, commit in history:
-                self.history = EventGraph.sequentially(self.history, commit)
-        else:
-            self.history = history
+        self.history = history
         self.branches = []
+        self.elapsed_time = elapsed_time
 
     def emit(self, topic, value):
-        self.tip = EventGraph.sequentially(self.tip, EventGraph.atom(Event(topic, value)))  # TODO get progeny
+        self.tip = EventGraph.sequentially(self.tip, EventGraph.Atom(Event(topic, value)))
+
+    def read(self, topic_or_topics):
+        topics = [topic_or_topics] if type(topic_or_topics) != list else topic_or_topics
+        res = []
+        for start_offset, x in self.get_visible_history():
+            filtered = EventGraph.filter(x, topics)
+            if type(filtered) != EventGraph.Empty:
+                res.append((start_offset, filtered))
+        return res
 
     def spawn(self, event_graph):
         self.branches.append((self.tip, event_graph))
         self.tip = EventGraph.empty()
 
-    def get_current_history(self, include_history=True):
-        if include_history:
-            res = self.history
-        else:
-            res = EventGraph.empty()
+    def get_visible_history(self):
+        res = EventGraph.empty()
         for base, _ in self.branches:
             res = EventGraph.sequentially(res, base)
         res = EventGraph.sequentially(res, self.tip)
-        return res
+        return self.history + [(self.elapsed_time, res)]
 
     def collect(self):
         res = self.tip
@@ -178,7 +182,7 @@ def simulate(register_engine, model_class, plan):
                 engine.schedule.schedule(engine.elapsed_time, task)
             else:
                 engine.awaiting_conditions.append((condition, task))
-    return sorted(engine.spans, key=lambda x: (x[1], x[2])), list(engine.events)
+    return sorted(engine.spans, key=lambda x: (x[1], x[2])), list(engine.events), None  # Third item is "payload", unused.
 
 
 def make_generator(f, arguments):

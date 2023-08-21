@@ -19,3 +19,15 @@ Completed = namedtuple("Completed", "")
 class Plan:
     def __init__(self, directives):
         self.directives: List[Directive] = list(directives)
+
+def tuple_args(args):
+    return tuple(sorted(args.items()))
+
+def untuple_args(tupled_args):
+    return {k: v for k, v in tupled_args}
+
+def hashable_directive(directive):
+    return Directive(directive.type, directive.start_time, tuple_args(directive.args))
+
+def restore_directive(hashable_directive):
+    return Directive(hashable_directive.type, hashable_directive.start_time, untuple_args(hashable_directive.args))

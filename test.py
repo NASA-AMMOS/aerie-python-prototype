@@ -6,10 +6,14 @@ from protocol import Plan, Directive
 
 
 def test_baseline():
+    run_baseline(sim)
+
+
+def run_baseline(sim):
     def register_engine(engine):
         facade.sim_engine = engine
 
-    spans, sim_events = sim.simulate(
+    spans, sim_events, _ = sim.simulate(
         register_engine,
         model.Model,
         Plan(
@@ -52,7 +56,7 @@ def compute_profiles(model, sim_events):
     engine = sim.SimulationEngine()
     facade.sim_engine = engine
     engine.events = []
-    engine.current_task_frame = sim.TaskFrame(history=engine.events)
+    engine.current_task_frame = sim.TaskFrame(engine.elapsed_time, history=engine.events)
     profiles = {}
     for attribute in model.attributes():
         profiles[attribute] = []
@@ -61,10 +65,14 @@ def compute_profiles(model, sim_events):
     for start_offset, event_graph in sim_events:
         engine.elapsed_time = start_offset
         engine.events.append((start_offset, event_graph))
-        engine.current_task_frame = sim.TaskFrame(history=engine.events)
+        engine.current_task_frame = sim.TaskFrame(start_offset, history=engine.events)
         for attribute in model.attributes():
             profiles[attribute].append((start_offset, getattr(model, attribute).get()))
     return profiles
+
+
+def test_incremental_baseline():
+    run_baseline(incremental_sim)
 
 
 def test_incremental():
@@ -77,9 +85,9 @@ def test_incremental():
             Directive("callee_activity", 15, {"value": 2}),
         ]
     )
-    old_spans, old_sim_events = sim.simulate(register_engine, model.Model, old_plan)
+    _, _, payload = incremental_sim.simulate(register_engine, model.Model, old_plan)
 
-    expected_spans, expected_sim_events = sim.simulate(
+    expected_spans, expected_sim_events, _ = sim.simulate(
         register_engine,
         model.Model,
         Plan(
@@ -101,7 +109,7 @@ def test_incremental():
         register_engine(engine)
         engine.activity_types_by_name["callee_activity"] = error_on_rerun_callee_activity
 
-    actual_spans, actual_sim_events = incremental_sim.simulate_incremental(
+    actual_spans, actual_sim_events, _ = incremental_sim.simulate_incremental(
         register_engine_with_error_activity,
         model.Model,
         Plan(
@@ -111,8 +119,119 @@ def test_incremental():
             ]
         ),
         old_plan,
-        old_spans,
-        old_sim_events,
+        payload
+    )
+
+    assert [(x, sim.EventGraph.to_string(y)) for x, y in actual_sim_events] == [(x, sim.EventGraph.to_string(y)) for x, y in expected_sim_events]
+    assert actual_spans == expected_spans
+
+
+def test_incremental_more_complex_add_only():
+    def register_engine(engine):
+        facade.sim_engine = engine
+
+    old_plan = Plan(
+        [
+            Directive("my_other_activity", 10, {}),
+            Directive("my_activity", 20, {"param1": 5}),
+            Directive("caller_activity", 50, {}),
+        ]
+    )
+    _, _, payload = incremental_sim.simulate(register_engine, model.Model, old_plan)
+
+    expected_spans, expected_sim_events, _ = sim.simulate(
+        register_engine,
+        model.Model,
+        Plan(
+            [
+                Directive("my_other_activity", 10, {}),
+                Directive("my_activity", 20, {"param1": 5}),
+                Directive("caller_activity", 50, {}),
+                Directive("my_decomposing_activity", 60, {}),
+            ]
+        ),
+    )
+
+    def error_on_rerun(name):
+        def foo(*args, **kwargs):
+            raise ValueError("Reran " + str(name))
+
+    def register_engine_with_error_activity(engine):
+        register_engine(engine)
+        for x in (
+                "my_other_activity",
+                "my_activity",
+                "caller_activity"
+        ):
+            engine.activity_types_by_name[x] = error_on_rerun(x)
+
+    actual_spans, actual_sim_events, _ = incremental_sim.simulate_incremental(
+        register_engine_with_error_activity,
+        model.Model,
+        Plan(
+            [
+                Directive("my_other_activity", 10, {}),
+                Directive("my_activity", 20, {"param1": 5}),
+                Directive("caller_activity", 50, {}),
+                Directive("my_decomposing_activity", 60, {}),
+            ]
+        ),
+        old_plan,
+        payload
+    )
+
+    assert [(x, sim.EventGraph.to_string(y)) for x, y in actual_sim_events] == [(x, sim.EventGraph.to_string(y)) for x, y in expected_sim_events]
+    assert actual_spans == expected_spans
+
+
+def test_incremental_more_complex_remove_only():
+    def register_engine(engine):
+        facade.sim_engine = engine
+
+    old_plan = Plan(
+        [
+            Directive("my_other_activity", 10, {}),
+            Directive("my_activity", 20, {"param1": 5}),
+            Directive("caller_activity", 50, {}),
+        ]
+    )
+    _, _, payload = incremental_sim.simulate(register_engine, model.Model, old_plan)
+
+    expected_spans, expected_sim_events, _ = sim.simulate(
+        register_engine,
+        model.Model,
+        Plan(
+            [
+                Directive("my_other_activity", 10, {}),
+                Directive("my_activity", 20, {"param1": 5}),
+            ]
+        ),
+    )
+
+    def error_on_rerun(name):
+        def foo(*args, **kwargs):
+            raise ValueError("Reran " + str(name))
+
+    def register_engine_with_error_activity(engine):
+        register_engine(engine)
+        for x in (
+                "my_other_activity",
+                "my_activity",
+                "caller_activity"
+        ):
+            engine.activity_types_by_name[x] = error_on_rerun(x)
+
+    actual_spans, actual_sim_events, _ = incremental_sim.simulate_incremental(
+        register_engine_with_error_activity,
+        model.Model,
+        Plan(
+            [
+                Directive("my_other_activity", 10, {}),
+                Directive("my_activity", 20, {"param1": 5}),
+            ]
+        ),
+        old_plan,
+        payload
     )
 
     assert [(x, sim.EventGraph.to_string(y)) for x, y in actual_sim_events] == [(x, sim.EventGraph.to_string(y)) for x, y in expected_sim_events]
