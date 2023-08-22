@@ -58,6 +58,15 @@ def read_topic(model, topic, _):
     facade.sim_engine.current_task_frame.emit("history", res)
 
 
+def emit_then_read(model, read_topic, emit_topic, delay, value, _):
+    import sim as facade
+    facade.sim_engine.current_task_frame.emit(emit_topic, value)
+    yield Delay(delay)
+    res = []
+    for start_offset, events in facade.sim_engine.current_task_frame.read(read_topic):
+        res.append((start_offset, EventGraph.to_string(events)))
+    facade.sim_engine.current_task_frame.emit("history", res)
+
 class Model:
     def __init__(self):
         self.x = Register("x", 55)
@@ -75,6 +84,7 @@ class Model:
             caller_activity,
             callee_activity,
             emit_event,
-            read_topic
+            read_topic,
+            emit_then_read
         ]
         return {x.__name__: x for x in activity_types}

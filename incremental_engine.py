@@ -231,10 +231,14 @@ def simulate(register_engine, model_class, plan, old_events=None, deleted_tasks=
 
         if newly_stale_readers:
             deleted_tasks.update(newly_stale_readers)
-            # Filter out all events from this task in the future
+            # Filter out all events from these tasks in the future
             for i in range(len(old_events)):
                 start_offset, event_graph = old_events[i]
                 old_events[i] = (start_offset, EventGraph.filter_p(event_graph, lambda evt: evt.progeny not in newly_stale_readers))
+            # Filter out all events from these tasks in the past
+            for i in range(len(engine.events)):
+                start_offset, event_graph = engine.events[i]
+                engine.events[i] = (start_offset, EventGraph.filter_p(event_graph, lambda evt: evt.progeny not in newly_stale_readers))
             # Rewind time
             old_events = engine.events + old_events
             engine.events = []
