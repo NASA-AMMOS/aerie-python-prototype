@@ -408,8 +408,9 @@ def test_incremental_with_reads_made_stale_dynamically_with_durative_activities(
 
     old_plan = Plan(
         [
-            Directive("emit_then_read", 10, {"read_topic": "x", "emit_topic": "y", "value": 1, "delay": 5, "_": 1}),
+            Directive("read_emit_three_times", 10, {"read_topic": "x", "emit_topic": "y", "delay": 5, "_": 1}),
             Directive("emit_event", 12, {"topic": "x", "value": 1, "_": 1}),
+            Directive("read_topic", 30, {"topic": "y", "_": 1}),
         ]
     )
     _, _, payload = incremental_sim.simulate(register_engine, model.Model, old_plan)
@@ -419,31 +420,32 @@ def test_incremental_with_reads_made_stale_dynamically_with_durative_activities(
         model.Model,
         Plan(
             [
-                Directive("emit_then_read", 10, {"read_topic": "x", "emit_topic": "y", "value": 1, "delay": 5, "_": 1}),
+                Directive("read_emit_three_times", 10, {"read_topic": "x", "emit_topic": "y", "delay": 5, "_": 1}),
                 Directive("emit_event", 12, {"topic": "x", "value": 1, "_": 1}),
                 Directive("emit_event", 13, {"topic": "x", "value": 2, "_": 2}),
+                Directive("read_topic", 30, {"topic": "y", "_": 1}),
             ]
         ),
     )
 
     def register_engine_with_error_activity(engine):
         register_engine(engine)
-        real_my_activity = engine.activity_types_by_name["my_activity"]
-        def fake_my_activity(model, param1):
-            if param1 == 4:
+        real_emit_event = engine.activity_types_by_name["emit_event"]
+        def fake_emit_event(model, **kwargs):
+            if kwargs["_"] == 1:
                 raise ValueError("Resimulated unchanged activity!")
-            for task_status in real_my_activity(model, param1):
-                yield task_status
-        engine.activity_types_by_name["my_activity"] = fake_my_activity
+            return real_emit_event(model, **kwargs)
+        engine.activity_types_by_name["emit_event"] = fake_emit_event
 
     actual_spans, actual_sim_events, _ = incremental_sim.simulate_incremental(
         register_engine_with_error_activity,
         model.Model,
         Plan(
             [
-                Directive("emit_then_read", 10, {"read_topic": "x", "emit_topic": "y", "value": 1, "delay": 5, "_": 1}),
+                Directive("read_emit_three_times", 10, {"read_topic": "x", "emit_topic": "y", "delay": 5, "_": 1}),
                 Directive("emit_event", 12, {"topic": "x", "value": 1, "_": 1}),
                 Directive("emit_event", 13, {"topic": "x", "value": 2, "_": 2}),
+                Directive("read_topic", 30, {"topic": "y", "_": 1}),
             ]
         ),
         old_plan,

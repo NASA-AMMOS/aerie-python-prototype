@@ -67,6 +67,18 @@ def emit_then_read(model, read_topic, emit_topic, delay, value, _):
         res.append((start_offset, EventGraph.to_string(events)))
     facade.sim_engine.current_task_frame.emit("history", res)
 
+
+def read_emit_three_times(model, read_topic, emit_topic, delay, _):
+    import sim as facade
+    for x in range(3):
+        res = []
+        for start_offset, events in facade.sim_engine.current_task_frame.read(read_topic):
+            res.append((start_offset, EventGraph.to_string(events)))
+        facade.sim_engine.current_task_frame.emit(emit_topic, res)
+        if x < 2:
+            yield Delay(delay)
+
+
 class Model:
     def __init__(self):
         self.x = Register("x", 55)
@@ -85,6 +97,7 @@ class Model:
             callee_activity,
             emit_event,
             read_topic,
-            emit_then_read
+            emit_then_read,
+            read_emit_three_times
         ]
         return {x.__name__: x for x in activity_types}
