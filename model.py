@@ -79,6 +79,22 @@ def read_emit_three_times(model, read_topic, emit_topic, delay, _):
             yield Delay(delay)
 
 
+def parent_of_reading_child(model):
+    import sim as facade
+    facade.sim_engine.current_task_frame.emit("y", 1)
+    yield Call(reading_child, {})
+    facade.sim_engine.current_task_frame.emit("y", 2)
+
+
+def reading_child(model):
+    import sim as facade
+    res = []
+    for start_offset, events in facade.sim_engine.current_task_frame.read("x"):
+        res.append((start_offset, EventGraph.to_string(events)))
+    facade.sim_engine.current_task_frame.emit("history", res)
+    yield Delay(model.x.get())
+
+
 class Model:
     def __init__(self):
         self.x = Register("x", 55)
@@ -98,6 +114,8 @@ class Model:
             emit_event,
             read_topic,
             emit_then_read,
-            read_emit_three_times
+            read_emit_three_times,
+            parent_of_reading_child,
+            reading_child
         ]
         return {x.__name__: x for x in activity_types}

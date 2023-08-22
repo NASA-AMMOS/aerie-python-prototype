@@ -262,6 +262,30 @@ def test_incremental_with_reads_made_stale_dynamically_with_durative_activities(
         overrides,
     )
 
+def test_incremental_child_activity():
+    """
+    Parent -> child
+    child reads x and delays for x
+
+    Change plan with a new write to x
+
+    Parent should emit its second event later
+    """
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("parent_of_reading_child", 10, {}),
+            ]
+        ),
+        Plan(
+            [
+                Directive("emit_event", 5, {"topic": "x", "value": 1, "_": 1}),
+                Directive("parent_of_reading_child", 10, {}),
+            ]
+        ),
+        {}
+    )
+
 
 def incremental_sim_test_case(old_plan, new_plan, overrides):
     def register_engine(engine):

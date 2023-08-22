@@ -176,13 +176,15 @@ class JobSchedule:
         return len(self._schedule) == 0
 
 
-def simulate(register_engine, model_class, plan, stop_time=None, old_events=None, deleted_tasks=None, old_task_directives=None):
+def simulate(register_engine, model_class, plan, stop_time=None, old_events=None, deleted_tasks=None, old_task_directives=None, old_task_parent=None):
     if old_events is None:
         old_events = []
     if deleted_tasks is None:
         deleted_tasks = set()
     if old_task_directives is None:
         old_task_directives = {}
+    if old_task_parent is None:
+        old_task_parent = {}
     engine = SimulationEngine()
     engine.register_model(model_class)
     register_engine(engine)
@@ -232,18 +234,35 @@ def simulate(register_engine, model_class, plan, stop_time=None, old_events=None
             newly_stale_readers.update(EventGraph.to_set(filtered, lambda evt: evt.progeny))
 
         if newly_stale_readers:
+            worklist = list(newly_stale_readers)
+            while worklist:
+                reader = worklist.pop(0)
+                if reader not in old_task_directives:
+                    # If the stale read is in a child activity, restart the parent???
+                    # Can we do better??? Can we use the spans?
+                    newly_stale_readers.add(old_task_parent[reader])
+                    worklist.append(old_task_parent[reader])
+
             deleted_tasks.update(newly_stale_readers)
             # Filter out all events from these tasks in the future
             for i in range(len(old_events)):
                 start_offset, event_graph = old_events[i]
                 old_events[i] = (start_offset, EventGraph.filter_p(event_graph, lambda evt: evt.progeny not in newly_stale_readers))
+            old_events = [x for x in old_events if type(x[1]) != EventGraph.Empty]
 
             temp_engine: Optional[SimulationEngine] = None
             def local_register_engine(engine):
                 nonlocal temp_engine
                 temp_engine = engine
                 register_engine(engine)
-            _, _, _ = simulate(local_register_engine, model_class, Plan([old_task_directives[reader_task] for reader_task in newly_stale_readers]), stop_time=engine.elapsed_time)
+
+            directives_to_simulate = []
+            for reader_task in newly_stale_readers:
+                if reader_task in old_task_directives:
+                    directives_to_simulate.append(old_task_directives[reader_task])
+                else:
+                    pass  # The parents for these should already be included in newly_stale_readers
+            _, _, _ = simulate(local_register_engine, model_class, Plan(directives_to_simulate), stop_time=engine.elapsed_time)
             register_engine(engine)  # restore the main engine
             engine.task_children.update(temp_engine.task_children)   # = {}
             while not temp_engine.schedule.is_empty():
@@ -256,12 +275,6 @@ def simulate(register_engine, model_class, plan, stop_time=None, old_events=None
             engine.awaiting_conditions.extend(temp_engine.awaiting_conditions)  # = []
             engine.awaiting_tasks.update(temp_engine.awaiting_tasks)   # = {}  # map from blocking task to blocked task
             engine.spans.extend(temp_engine.spans)   # = []
-            print()
-
-
-        # stale_tasks = {x.progeny for x in stale_reads if x.progeny not in deleted_tasks}
-        # task_to_directive = {task: directive for directive, task in payload["plan_directive_to_task"].items()}
-        # stale_directives = [restore_directive(task_to_directive[task]) for task in stale_tasks]
 
         old_awaiting_conditions = list(engine.awaiting_conditions)
         engine.awaiting_conditions.clear()
@@ -285,15 +298,16 @@ def simulate(register_engine, model_class, plan, stop_time=None, old_events=None
 
     engine.events.extend(old_events)
 
-    deleted_directives = [old_task_directives[task] for task in deleted_tasks if task in old_task_directives]
+    spans = sorted(engine.spans, key=lambda x: (x[1], x[2]))
 
-    spans = sorted(filter(lambda span: span[0] not in deleted_directives, engine.spans), key=lambda x: (x[1], x[2]))
     payload = {
         "events": list(engine.events),
         "spans": spans,
         "plan_directive_to_task": {hashable_directive(y): x for x, y in engine.task_directives.items()},
         "task_directives": engine.task_directives,
         "task_children": engine.task_children,
+        "task_parent": {child: parent for parent, children in engine.task_children.items() for child in children},
+        "deleted_tasks": deleted_tasks
     }
     filtered_spans = remove_task_from_spans(spans)
     return filtered_spans, without_read_events(engine.events), payload
@@ -356,12 +370,17 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
         if type(filtered) != EventGraph.Empty:
             old_events_without_deleted_tasks.append((start_offset, filtered))
 
-    new_spans, new_events, _ = simulate(
+    new_spans, new_events, new_payload = simulate(
         register_engine,
         model_class,
-        Plan(directives_to_simulate), old_events=old_events_without_deleted_tasks, deleted_tasks=set(deleted_tasks), old_task_directives=payload["task_directives"])
+        Plan(directives_to_simulate), old_events=old_events_without_deleted_tasks, deleted_tasks=set(deleted_tasks), old_task_directives=payload["task_directives"], old_task_parent=payload["task_parent"])
 
     old_spans = list(payload["spans"])
+
+    deleted_tasks.extend(new_payload["deleted_tasks"])
+    for task in deleted_tasks:
+        if task in payload["task_directives"]:
+            deleted_directives.append(payload["task_directives"][task])
 
     for deleted_directive in deleted_directives:
         old_spans = [x for x in old_spans if x[0] != deleted_directive]
