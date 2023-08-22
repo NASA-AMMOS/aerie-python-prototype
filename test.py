@@ -6,6 +6,8 @@ import model
 import sim as facade
 from protocol import Plan, Directive
 
+model_ = model
+
 
 def test_baseline():
     run_baseline(sim)
@@ -78,72 +80,44 @@ def test_incremental_baseline():
 
 
 def test_incremental():
-    def register_engine(engine):
-        facade.sim_engine = engine
-
-    old_plan = Plan(
-        [
-            Directive("callee_activity", 10, {"value": 1}),
-            Directive("callee_activity", 15, {"value": 2}),
-        ]
-    )
-    _, _, payload = incremental_sim.simulate(register_engine, model.Model, old_plan)
-
-    expected_spans, expected_sim_events, _ = sim.simulate(
-        register_engine,
-        model.Model,
-        Plan(
-            [
-                Directive("callee_activity", 10, {"value": 1}),
-                Directive("callee_activity", 15, {"value": 3}),  # Changed value only
-            ]
-        ),
-    )
-
-    callee_activity = model.callee_activity
-
     def error_on_rerun_callee_activity(model: "Model", value):
         if value == 1:
             raise Exception("Incremental simulation reran callee_activity with value " + str(value))
-        return callee_activity(model, value)
+        return model_.callee_activity(model, value)
 
-    def register_engine_with_error_activity(engine):
-        register_engine(engine)
-        engine.activity_types_by_name["callee_activity"] = error_on_rerun_callee_activity
-
-    actual_spans, actual_sim_events, _ = incremental_sim.simulate_incremental(
-        register_engine_with_error_activity,
-        model.Model,
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("callee_activity", 10, {"value": 1}),
+                Directive("callee_activity", 15, {"value": 2}),
+            ]
+        ),
         Plan(
             [
                 Directive("callee_activity", 10, {"value": 1}),
                 Directive("callee_activity", 15, {"value": 3}),  # Changed value only
             ]
         ),
-        old_plan,
-        payload
+        {"callee_activity": error_on_rerun_callee_activity},
     )
 
-    assert [(x, sim.EventGraph.to_string(y)) for x, y in actual_sim_events] == [(x, sim.EventGraph.to_string(y)) for x, y in expected_sim_events]
-    assert actual_spans == expected_spans
+
+def error_on_rerun(name):
+    def foo(*args, **kwargs):
+        raise ValueError("Reran " + str(name))
+
+    return foo
 
 
 def test_incremental_more_complex_add_only():
-    def register_engine(engine):
-        facade.sim_engine = engine
-
-    old_plan = Plan(
-        [
-            Directive("my_other_activity", 10, {}),
-            Directive("my_activity", 20, {"param1": 5}),
-            Directive("caller_activity", 50, {}),
-        ]
-    )
-    _, _, payload = incremental_sim.simulate(register_engine, model.Model, old_plan)
-
-    expected_spans, expected_sim_events, _ = sim.simulate(
-        register_engine,
-        model.Model,
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("my_other_activity", 10, {}),
+                Directive("my_activity", 20, {"param1": 5}),
+                Directive("caller_activity", 50, {}),
+            ]
+        ),
         Plan(
             [
                 Directive("my_other_activity", 10, {}),
@@ -152,113 +126,47 @@ def test_incremental_more_complex_add_only():
                 Directive("my_decomposing_activity", 60, {}),
             ]
         ),
+        {x: error_on_rerun(x) for x in ("my_other_activity", "my_activity", "caller_activity")},
     )
-
-    def error_on_rerun(name):
-        def foo(*args, **kwargs):
-            raise ValueError("Reran " + str(name))
-        return foo
-
-    def register_engine_with_error_activity(engine):
-        register_engine(engine)
-        for x in (
-                "my_other_activity",
-                "my_activity",
-                "caller_activity"
-        ):
-            engine.activity_types_by_name[x] = error_on_rerun(x)
-
-    actual_spans, actual_sim_events, _ = incremental_sim.simulate_incremental(
-        register_engine_with_error_activity,
-        model.Model,
-        Plan(
-            [
-                Directive("my_other_activity", 10, {}),
-                Directive("my_activity", 20, {"param1": 5}),
-                Directive("caller_activity", 50, {}),
-                Directive("my_decomposing_activity", 60, {}),
-            ]
-        ),
-        old_plan,
-        payload
-    )
-
-    assert [(x, sim.EventGraph.to_string(y)) for x, y in actual_sim_events] == [(x, sim.EventGraph.to_string(y)) for x, y in expected_sim_events]
-    assert actual_spans == expected_spans
 
 
 def test_incremental_more_complex_remove_only():
-    def register_engine(engine):
-        facade.sim_engine = engine
-
-    old_plan = Plan(
-        [
-            Directive("my_other_activity", 10, {}),
-            Directive("my_activity", 20, {"param1": 5}),
-            Directive("caller_activity", 50, {}),
-        ]
-    )
-    _, _, payload = incremental_sim.simulate(register_engine, model.Model, old_plan)
-
-    expected_spans, expected_sim_events, _ = sim.simulate(
-        register_engine,
-        model.Model,
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("my_other_activity", 10, {}),
+                Directive("my_activity", 20, {"param1": 5}),
+                Directive("caller_activity", 50, {}),
+            ]
+        ),
         Plan(
             [
                 Directive("my_other_activity", 10, {}),
                 Directive("my_activity", 20, {"param1": 5}),
             ]
         ),
+        {x: error_on_rerun(x) for x in ("my_other_activity", "my_activity", "caller_activity")},
     )
-
-    def error_on_rerun(name):
-        def foo(*args, **kwargs):
-            raise ValueError("Reran " + str(name))
-        return foo
-
-    def register_engine_with_error_activity(engine):
-        register_engine(engine)
-        for x in (
-                "my_other_activity",
-                "my_activity",
-                "caller_activity"
-        ):
-            engine.activity_types_by_name[x] = error_on_rerun(x)
-
-    actual_spans, actual_sim_events, _ = incremental_sim.simulate_incremental(
-        register_engine_with_error_activity,
-        model.Model,
-        Plan(
-            [
-                Directive("my_other_activity", 10, {}),
-                Directive("my_activity", 20, {"param1": 5}),
-            ]
-        ),
-        old_plan,
-        payload
-    )
-
-    assert [(x, sim.EventGraph.to_string(y)) for x, y in actual_sim_events] == [(x, sim.EventGraph.to_string(y)) for x, y in expected_sim_events]
-    assert actual_spans == expected_spans
 
 
 def test_incremental_with_reads():
-    def register_engine(engine):
-        facade.sim_engine = engine
+    real_my_activity = model_.my_activity
 
-    old_plan = Plan(
-        [
-            Directive("my_other_activity", 10, {}),
-            Directive("my_activity", 20, {"param1": 4}),
-            Directive("my_other_activity", 110, {}),
-            Directive("my_activity", 120, {"param1": 5}),
-        ]
-    )
-    _, _, payload = incremental_sim.simulate(register_engine, model.Model, old_plan)
+    def fake_my_activity(model, param1):
+        if param1 == 4:
+            raise ValueError("Resimulated unchanged activity!")
+        for task_status in real_my_activity(model, param1):
+            yield task_status
 
-    expected_spans, expected_sim_events, _ = sim.simulate(
-        register_engine,
-        model.Model,
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("my_other_activity", 10, {}),
+                Directive("my_activity", 20, {"param1": 4}),
+                Directive("my_other_activity", 110, {}),
+                Directive("my_activity", 120, {"param1": 5}),
+            ]
+        ),
         Plan(
             [
                 Directive("my_other_activity", 10, {}),
@@ -267,52 +175,26 @@ def test_incremental_with_reads():
                 Directive("my_activity", 119, {"param1": 5}),
             ]
         ),
+        {"my_activity": fake_my_activity},
     )
-
-    def register_engine_with_error_activity(engine):
-        register_engine(engine)
-        real_my_activity = engine.activity_types_by_name["my_activity"]
-        def fake_my_activity(model, param1):
-            if param1 == 4:
-                raise ValueError("Resimulated unchanged activity!")
-            for task_status in real_my_activity(model, param1):
-                yield task_status
-        engine.activity_types_by_name["my_activity"] = fake_my_activity
-
-    actual_spans, actual_sim_events, _ = incremental_sim.simulate_incremental(
-        register_engine_with_error_activity,
-        model.Model,
-        Plan(
-            [
-                Directive("my_other_activity", 10, {}),
-                Directive("my_activity", 20, {"param1": 4}),
-                Directive("my_other_activity", 110, {}),
-                Directive("my_activity", 119, {"param1": 5}),
-            ]
-        ),
-        old_plan,
-        payload
-    )
-
-    assert [(x, sim.EventGraph.to_string(y)) for x, y in actual_sim_events] == [(x, sim.EventGraph.to_string(y)) for x, y in expected_sim_events]
-    assert actual_spans == expected_spans
 
 
 def test_incremental_with_new_reads_of_old_topics():
-    def register_engine(engine):
-        facade.sim_engine = engine
+    real_my_activity = model_.my_activity
 
-    old_plan = Plan(
-        [
-            Directive("emit_event", 10, {"topic": "x", "value": 1, "_": 1}),
-            Directive("read_topic", 15, {"topic": "x", "_": 1}),
-        ]
-    )
-    _, _, payload = incremental_sim.simulate(register_engine, model.Model, old_plan)
+    def fake_my_activity(model, param1):
+        if param1 == 4:
+            raise ValueError("Resimulated unchanged activity!")
+        for task_status in real_my_activity(model, param1):
+            yield task_status
 
-    expected_spans, expected_sim_events, _ = sim.simulate(
-        register_engine,
-        model.Model,
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("emit_event", 10, {"topic": "x", "value": 1, "_": 1}),
+                Directive("read_topic", 15, {"topic": "x", "_": 1}),
+            ]
+        ),
         Plan(
             [
                 Directive("emit_event", 10, {"topic": "x", "value": 1, "_": 1}),
@@ -320,51 +202,26 @@ def test_incremental_with_new_reads_of_old_topics():
                 Directive("read_topic", 16, {"topic": "x", "_": 2}),
             ]
         ),
+        {"my_activity": fake_my_activity},
     )
-
-    def register_engine_with_error_activity(engine):
-        register_engine(engine)
-        real_my_activity = engine.activity_types_by_name["my_activity"]
-        def fake_my_activity(model, param1):
-            if param1 == 4:
-                raise ValueError("Resimulated unchanged activity!")
-            for task_status in real_my_activity(model, param1):
-                yield task_status
-        engine.activity_types_by_name["my_activity"] = fake_my_activity
-
-    actual_spans, actual_sim_events, _ = incremental_sim.simulate_incremental(
-        register_engine_with_error_activity,
-        model.Model,
-        Plan(
-            [
-                Directive("emit_event", 10, {"topic": "x", "value": 1, "_": 1}),
-                Directive("read_topic", 15, {"topic": "x", "_": 1}),
-                Directive("read_topic", 16, {"topic": "x", "_": 2}),
-            ]
-        ),
-        old_plan,
-        payload
-    )
-
-    assert [(x, sim.EventGraph.to_string(y)) for x, y in actual_sim_events] == [(x, sim.EventGraph.to_string(y)) for x, y in expected_sim_events]
-    assert actual_spans == expected_spans
 
 
 def test_incremental_with_reads_made_stale_dynamically():
-    def register_engine(engine):
-        facade.sim_engine = engine
+    real_my_activity = model_.my_activity
 
-    old_plan = Plan(
-        [
-            Directive("emit_event", 10, {"topic": "x", "value": 1, "_": 1}),
-            Directive("read_topic", 15, {"topic": "x", "_": 1}),
-        ]
-    )
-    _, _, payload = incremental_sim.simulate(register_engine, model.Model, old_plan)
+    def fake_my_activity(model, param1):
+        if param1 == 4:
+            raise ValueError("Resimulated unchanged activity!")
+        for task_status in real_my_activity(model, param1):
+            yield task_status
 
-    expected_spans, expected_sim_events, _ = sim.simulate(
-        register_engine,
-        model.Model,
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("emit_event", 10, {"topic": "x", "value": 1, "_": 1}),
+                Directive("read_topic", 15, {"topic": "x", "_": 1}),
+            ]
+        ),
         Plan(
             [
                 Directive("emit_event", 10, {"topic": "x", "value": 1, "_": 1}),
@@ -372,87 +229,60 @@ def test_incremental_with_reads_made_stale_dynamically():
                 Directive("read_topic", 15, {"topic": "x", "_": 1}),
             ]
         ),
+        {"my_activity": fake_my_activity},
     )
-
-    def register_engine_with_error_activity(engine):
-        register_engine(engine)
-        real_my_activity = engine.activity_types_by_name["my_activity"]
-        def fake_my_activity(model, param1):
-            if param1 == 4:
-                raise ValueError("Resimulated unchanged activity!")
-            for task_status in real_my_activity(model, param1):
-                yield task_status
-        engine.activity_types_by_name["my_activity"] = fake_my_activity
-
-    actual_spans, actual_sim_events, _ = incremental_sim.simulate_incremental(
-        register_engine_with_error_activity,
-        model.Model,
-        Plan(
-            [
-                Directive("emit_event", 10, {"topic": "x", "value": 1, "_": 1}),
-                Directive("emit_event", 11, {"topic": "x", "value": 2, "_": 2}),
-                Directive("read_topic", 15, {"topic": "x", "_": 1}),
-            ]
-        ),
-        old_plan,
-        payload
-    )
-
-    assert [(x, sim.EventGraph.to_string(y)) for x, y in actual_sim_events] == [(x, sim.EventGraph.to_string(y)) for x, y in expected_sim_events]
-    assert actual_spans == expected_spans
 
 
 def test_incremental_with_reads_made_stale_dynamically_with_durative_activities():
+    overrides = {}
+
+    def fake_emit_event(model, **kwargs):
+        if kwargs["_"] == 1:
+            raise ValueError("Resimulated unchanged activity!")
+        return model_.emit_event(model, **kwargs)
+
+    overrides["emit_event"] = fake_emit_event
+
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("read_emit_three_times", 10, {"read_topic": "x", "emit_topic": "y", "delay": 5, "_": 1}),
+                Directive("emit_event", 12, {"topic": "x", "value": 1, "_": 1}),
+                Directive("read_topic", 30, {"topic": "y", "_": 1}),
+            ]
+        ),
+        Plan(
+            [
+                Directive("read_emit_three_times", 10, {"read_topic": "x", "emit_topic": "y", "delay": 5, "_": 1}),
+                Directive("emit_event", 12, {"topic": "x", "value": 1, "_": 1}),
+                Directive("emit_event", 13, {"topic": "x", "value": 2, "_": 2}),
+                Directive("read_topic", 30, {"topic": "y", "_": 1}),
+            ]
+        ),
+        overrides,
+    )
+
+
+def incremental_sim_test_case(old_plan, new_plan, overrides):
     def register_engine(engine):
         facade.sim_engine = engine
 
-    old_plan = Plan(
-        [
-            Directive("read_emit_three_times", 10, {"read_topic": "x", "emit_topic": "y", "delay": 5, "_": 1}),
-            Directive("emit_event", 12, {"topic": "x", "value": 1, "_": 1}),
-            Directive("read_topic", 30, {"topic": "y", "_": 1}),
-        ]
-    )
     _, _, payload = incremental_sim.simulate(register_engine, model.Model, old_plan)
 
-    expected_spans, expected_sim_events, _ = sim.simulate(
-        register_engine,
-        model.Model,
-        Plan(
-            [
-                Directive("read_emit_three_times", 10, {"read_topic": "x", "emit_topic": "y", "delay": 5, "_": 1}),
-                Directive("emit_event", 12, {"topic": "x", "value": 1, "_": 1}),
-                Directive("emit_event", 13, {"topic": "x", "value": 2, "_": 2}),
-                Directive("read_topic", 30, {"topic": "y", "_": 1}),
-            ]
-        ),
-    )
+    expected_spans, expected_sim_events, _ = sim.simulate(register_engine, model.Model, new_plan)
 
     def register_engine_with_error_activity(engine):
         register_engine(engine)
-        real_emit_event = engine.activity_types_by_name["emit_event"]
-        def fake_emit_event(model, **kwargs):
-            if kwargs["_"] == 1:
-                raise ValueError("Resimulated unchanged activity!")
-            return real_emit_event(model, **kwargs)
-        engine.activity_types_by_name["emit_event"] = fake_emit_event
+        for name, impl in overrides.items():
+            engine.activity_types_by_name[name] = impl
 
     actual_spans, actual_sim_events, _ = incremental_sim.simulate_incremental(
-        register_engine_with_error_activity,
-        model.Model,
-        Plan(
-            [
-                Directive("read_emit_three_times", 10, {"read_topic": "x", "emit_topic": "y", "delay": 5, "_": 1}),
-                Directive("emit_event", 12, {"topic": "x", "value": 1, "_": 1}),
-                Directive("emit_event", 13, {"topic": "x", "value": 2, "_": 2}),
-                Directive("read_topic", 30, {"topic": "y", "_": 1}),
-            ]
-        ),
-        old_plan,
-        payload
+        register_engine_with_error_activity, model.Model, new_plan, old_plan, payload
     )
 
-    assert [(x, sim.EventGraph.to_string(y)) for x, y in actual_sim_events] == [(x, sim.EventGraph.to_string(y)) for x, y in expected_sim_events]
+    assert [(x, sim.EventGraph.to_string(y)) for x, y in actual_sim_events] == [
+        (x, sim.EventGraph.to_string(y)) for x, y in expected_sim_events
+    ]
     assert actual_spans == expected_spans
 
 
