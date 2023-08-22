@@ -239,7 +239,7 @@ def simulate(register_engine, model_class, plan, stop_time=None, old_events=None
             worklist = list(newly_stale_readers)
             while worklist:
                 reader = worklist.pop(0)
-                if reader not in old_task_directives:
+                if reader in old_task_parent:
                     # If the stale read is in a child activity, restart the parent???
                     # Can we do better??? Can we use the spans?
                     newly_stale_readers.add(old_task_parent[reader])
@@ -260,7 +260,7 @@ def simulate(register_engine, model_class, plan, stop_time=None, old_events=None
 
             directives_to_simulate = []
             for reader_task in newly_stale_readers:
-                if reader_task in old_task_directives:
+                if reader_task not in old_task_parent:
                     directives_to_simulate.append(old_task_directives[reader_task])
                 else:
                     pass  # The parents for these should already be included in newly_stale_readers
