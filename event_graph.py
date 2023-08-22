@@ -119,3 +119,15 @@ class EventGraph:
         if type(event_graph) == EventGraph.Concurrently:
             return EventGraph.concurrently(EventGraph.map(event_graph.left, f), EventGraph.map(event_graph.right, f))
         raise ValueError("Not an event_graph: " + str(event_graph))
+
+    @staticmethod
+    def to_set(event_graph, f=lambda x: x):
+        if type(event_graph) == EventGraph.Empty:
+            return event_graph
+        if type(event_graph) == EventGraph.Atom:
+            return {f(event_graph.value)}
+        if type(event_graph) == EventGraph.Sequentially:
+            return EventGraph.to_set(event_graph.prefix, f).union(EventGraph.to_set(event_graph.suffix, f))
+        if type(event_graph) == EventGraph.Concurrently:
+            return EventGraph.to_set(event_graph.left, f).union(EventGraph.to_set(event_graph.right, f))
+        raise ValueError("Not an event_graph: " + str(event_graph))

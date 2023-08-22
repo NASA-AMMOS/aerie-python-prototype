@@ -176,7 +176,13 @@ class JobSchedule:
         return len(self._schedule) == 0
 
 
-def simulate(register_engine, model_class, plan, old_events = []):
+def simulate(register_engine, model_class, plan, old_events=None, deleted_tasks=None, old_task_directives=None):
+    if old_events is None:
+        old_events = []
+    if deleted_tasks is None:
+        deleted_tasks = set()
+    if old_task_directives is None:
+        old_task_directives = {}
     engine = SimulationEngine()
     engine.register_model(model_class)
     register_engine(engine)
@@ -194,17 +200,20 @@ def simulate(register_engine, model_class, plan, old_events = []):
 
         batch_event_graph = EventGraph.empty()
 
+        for task in engine.schedule.get_next_batch():
+            task_status, event_graph = engine.step(
+                task, TaskFrame(engine.elapsed_time, task=task, history=engine.events)
+            )
+            batch_event_graph = EventGraph.concurrently(batch_event_graph, event_graph)
+
+        newly_invalidated_topics = EventGraph.to_set(batch_event_graph, lambda evt: evt.topic)
+
         if old_events and old_events[0][0] == resume_time:
             batch_event_graph = EventGraph.concurrently(batch_event_graph, old_events.pop(0)[1])
 
         if old_events and old_events[0][0] == resume_time:
             raise ValueError("Duplicate resume time in old_events:", resume_time)
 
-        for task in engine.schedule.get_next_batch():
-            task_status, event_graph = engine.step(
-                task, TaskFrame(engine.elapsed_time, task=task, history=engine.events)
-            )
-            batch_event_graph = EventGraph.concurrently(batch_event_graph, event_graph)
         if type(batch_event_graph) != EventGraph.Empty:
             if engine.events and engine.events[-1][0] == engine.elapsed_time:
                 engine.events[-1] = (
@@ -213,6 +222,35 @@ def simulate(register_engine, model_class, plan, old_events = []):
                 )
             else:
                 engine.events.append((engine.elapsed_time, batch_event_graph))
+
+        # TODO re-simulate stale reads
+        newly_stale_readers = set()
+        for start_offset, event_graph in old_events:
+            filtered = EventGraph.filter_p(event_graph, lambda evt: evt.topic == SPECIAL_READ_TOPIC and evt.progeny not in deleted_tasks and set(evt.value).intersection(newly_invalidated_topics))
+            newly_stale_readers.update(EventGraph.to_set(filtered, lambda evt: evt.progeny))
+
+        if newly_stale_readers:
+            deleted_tasks.update(newly_stale_readers)
+            # Filter out all events from this task in the future
+            for i in range(len(old_events)):
+                start_offset, event_graph = old_events[i]
+                old_events[i] = (start_offset, EventGraph.filter_p(event_graph, lambda evt: evt.progeny not in newly_stale_readers))
+            # Rewind time
+            old_events = engine.events + old_events
+            engine.events = []
+            engine.elapsed_time = 0
+
+            # Re-schedule the tasks
+            for reader_task in newly_stale_readers:
+                directive = old_task_directives[reader_task]
+                directive_type = engine.activity_types_by_name[directive.type]
+                task = engine.defer(directive_type, directive.start_time, directive.args)
+                engine.task_directives[task] = directive
+
+        # stale_tasks = {x.progeny for x in stale_reads if x.progeny not in deleted_tasks}
+        # task_to_directive = {task: directive for directive, task in payload["plan_directive_to_task"].items()}
+        # stale_directives = [restore_directive(task_to_directive[task]) for task in stale_tasks]
+
         old_awaiting_conditions = list(engine.awaiting_conditions)
         engine.awaiting_conditions.clear()
         condition_reads = EventGraph.empty()
@@ -235,11 +273,14 @@ def simulate(register_engine, model_class, plan, old_events = []):
 
     engine.events.extend(old_events)
 
-    spans = sorted(engine.spans, key=lambda x: (x[1], x[2]))
+    deleted_directives = [old_task_directives[task] for task in deleted_tasks if task in old_task_directives]
+
+    spans = sorted(filter(lambda span: span[0] not in deleted_directives, engine.spans), key=lambda x: (x[1], x[2]))
     payload = {
         "events": list(engine.events),
         "spans": spans,
         "plan_directive_to_task": {hashable_directive(y): x for x, y in engine.task_directives.items()},
+        "task_directives": engine.task_directives,
         "task_children": engine.task_children,
     }
     filtered_spans = remove_task_from_spans(spans)
@@ -303,7 +344,10 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
         if type(filtered) != EventGraph.Empty:
             old_events_without_deleted_tasks.append((start_offset, filtered))
 
-    new_spans, new_events, _ = simulate(register_engine, model_class, Plan(directives_to_simulate), old_events=old_events_without_deleted_tasks)
+    new_spans, new_events, _ = simulate(
+        register_engine,
+        model_class,
+        Plan(directives_to_simulate), old_events=old_events_without_deleted_tasks, deleted_tasks=set(deleted_tasks), old_task_directives=payload["task_directives"])
 
     old_spans = list(payload["spans"])
 

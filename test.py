@@ -349,7 +349,7 @@ def test_incremental_with_new_reads_of_old_topics():
     assert [(x, sim.EventGraph.to_string(y)) for x, y in actual_sim_events] == [(x, sim.EventGraph.to_string(y)) for x, y in expected_sim_events]
     assert actual_spans == expected_spans
 
-@pytest.mark.skip
+
 def test_incremental_with_reads_made_stale_dynamically():
     def register_engine(engine):
         facade.sim_engine = engine
