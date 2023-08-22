@@ -22,7 +22,7 @@ def my_other_activity(model: "Model"):
 
 def my_decomposing_activity(model: "Model"):
     model.x.set(55)
-    spawn(my_child_activity, {})
+    spawn("my_child_activity", {})
     model.x.set(57)
     yield Delay(1)
     model.x.set(55)
@@ -37,7 +37,7 @@ def my_child_activity(model: "Model"):
 
 def caller_activity(model: "Model"):
     model.x.set(100)
-    yield Call(callee_activity, {"value": 99})
+    yield Call("callee_activity", {"value": 99})
     model.x.set(98)
 
 
@@ -82,7 +82,7 @@ def read_emit_three_times(model, read_topic, emit_topic, delay, _):
 def parent_of_reading_child(model):
     import sim as facade
     facade.sim_engine.current_task_frame.emit("y", 1)
-    yield Call(reading_child, {})
+    yield Call("reading_child", {})
     facade.sim_engine.current_task_frame.emit("y", 2)
 
 
@@ -108,6 +108,7 @@ class Model:
         activity_types = [
             my_activity,
             my_other_activity,
+            my_child_activity,
             my_decomposing_activity,
             caller_activity,
             callee_activity,

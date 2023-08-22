@@ -43,9 +43,9 @@ def run_baseline(sim):
     assert spans == [
         (Directive(type="my_other_activity", start_time=10, args={}), 10, 35),
         (Directive(type="my_activity", start_time=20, args={"param1": 5}), 20, 35),
-        (("my_child_activity", {}), 40, 41),
+        (Directive(type="my_child_activity", start_time=40, args={}), 40, 41),
         (Directive(type="my_decomposing_activity", start_time=40, args={}), 40, 41),
-        (("callee_activity", {"value": 99}), 50, 50),
+        (Directive(type="callee_activity", start_time=50, args={"value": 99}), 50, 50),
         (Directive(type="caller_activity", start_time=50, args={}), 50, 50),
     ]
 
@@ -262,6 +262,7 @@ def test_incremental_with_reads_made_stale_dynamically_with_durative_activities(
         overrides,
     )
 
+
 def test_incremental_child_activity():
     """
     Parent -> child
@@ -283,7 +284,7 @@ def test_incremental_child_activity():
                 Directive("parent_of_reading_child", 10, {}),
             ]
         ),
-        {}
+        {"parent_of_reading_child": error_on_rerun("parent_of_reading_child")},
     )
 
 

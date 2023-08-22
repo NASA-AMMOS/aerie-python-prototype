@@ -40,6 +40,7 @@ class SimulationEngine:
     def spawn(self, directive_type, arguments):
         task = make_task(self.model, directive_type, arguments)
         self.task_inputs[task] = (directive_type, arguments)
+        self.task_directives[task] = Directive(directive_type, self.elapsed_time, arguments)
         self.spawn_task(task)
 
     def spawn_task(self, task):
@@ -58,6 +59,7 @@ class SimulationEngine:
         self.schedule.schedule(self.elapsed_time + duration, task)
         self.task_start_times[task] = self.elapsed_time + duration
         self.task_inputs[task] = (directive_type, arguments)
+        self.task_directives[task] = Directive(directive_type, self.elapsed_time + duration, arguments)
         return task
 
     def step(self, task, task_frame):
@@ -75,7 +77,7 @@ class SimulationEngine:
             self.spans.append(
                 (
                     self.task_directives.get(
-                        task, (self.task_inputs[task][0].__name__, self.task_inputs[task][1], task)
+                        task, (self.task_inputs[task][0], self.task_inputs[task][1], task)
                     ),
                     self.task_start_times[task],
                     self.elapsed_time,
@@ -88,6 +90,7 @@ class SimulationEngine:
             child_task = make_task(self.model, task_status.child_task, task_status.args)
             self.awaiting_tasks[child_task] = task
             self.task_inputs[child_task] = (task_status.child_task, task_status.args)
+            self.task_directives[child_task] = Directive(task_status.child_task, self.elapsed_time, task_status.args)
             self.spawn_task(child_task)
         else:
             raise ValueError("Unhandled task status: " + str(task_status))
@@ -145,10 +148,11 @@ class TaskFrame:
 
 
 def make_task(model, directive_type, arguments):
-    if inspect.isgeneratorfunction(directive_type):
-        return directive_type.__call__(model, **arguments)
+    func = model.get_activity_types()[directive_type]
+    if inspect.isgeneratorfunction(func):
+        return func.__call__(model, **arguments)
     else:
-        return make_generator(directive_type, dict(**arguments, model=model))
+        return make_generator(func, dict(**arguments, model=model))
 
 
 class JobSchedule:
@@ -189,9 +193,7 @@ def simulate(register_engine, model_class, plan, stop_time=None, old_events=None
     engine.register_model(model_class)
     register_engine(engine)
     for directive in plan.directives:
-        directive_type = engine.activity_types_by_name[directive.type]
-        task = engine.defer(directive_type, directive.start_time, directive.args)
-        engine.task_directives[task] = directive
+        engine.defer(directive.type, directive.start_time, directive.args)
 
     while not engine.schedule.is_empty():
         resume_time = engine.schedule.peek_next_time()
