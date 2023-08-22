@@ -1,7 +1,7 @@
 # This is a simplified Aerie for prototyping purposes
 from collections import namedtuple
 import inspect
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 from protocol import Completed, Delay, AwaitCondition, Directive, Call, Plan, tuple_args, hashable_directive, \
     restore_directive
@@ -176,7 +176,7 @@ class JobSchedule:
         return len(self._schedule) == 0
 
 
-def simulate(register_engine, model_class, plan, old_events=None, deleted_tasks=None, old_task_directives=None):
+def simulate(register_engine, model_class, plan, stop_time=None, old_events=None, deleted_tasks=None, old_task_directives=None):
     if old_events is None:
         old_events = []
     if deleted_tasks is None:
@@ -193,6 +193,8 @@ def simulate(register_engine, model_class, plan, old_events=None, deleted_tasks=
 
     while not engine.schedule.is_empty():
         resume_time = engine.schedule.peek_next_time()
+        if stop_time is not None and resume_time >= stop_time:
+            break
         engine.elapsed_time = resume_time
 
         while old_events and old_events[0][0] < resume_time:
@@ -235,21 +237,27 @@ def simulate(register_engine, model_class, plan, old_events=None, deleted_tasks=
             for i in range(len(old_events)):
                 start_offset, event_graph = old_events[i]
                 old_events[i] = (start_offset, EventGraph.filter_p(event_graph, lambda evt: evt.progeny not in newly_stale_readers))
-            # Filter out all events from these tasks in the past
-            for i in range(len(engine.events)):
-                start_offset, event_graph = engine.events[i]
-                engine.events[i] = (start_offset, EventGraph.filter_p(event_graph, lambda evt: evt.progeny not in newly_stale_readers))
-            # Rewind time
-            old_events = engine.events + old_events
-            engine.events = []
-            engine.elapsed_time = 0
 
-            # Re-schedule the tasks
-            for reader_task in newly_stale_readers:
-                directive = old_task_directives[reader_task]
-                directive_type = engine.activity_types_by_name[directive.type]
-                task = engine.defer(directive_type, directive.start_time, directive.args)
-                engine.task_directives[task] = directive
+            temp_engine: Optional[SimulationEngine] = None
+            def local_register_engine(engine):
+                nonlocal temp_engine
+                temp_engine = engine
+                register_engine(engine)
+            _, _, _ = simulate(local_register_engine, model_class, Plan([old_task_directives[reader_task] for reader_task in newly_stale_readers]), stop_time=engine.elapsed_time)
+            register_engine(engine)  # restore the main engine
+            engine.task_children.update(temp_engine.task_children)   # = {}
+            while not temp_engine.schedule.is_empty():
+                start_offset = temp_engine.schedule.peek_next_time()
+                for task in temp_engine.schedule.get_next_batch():
+                    engine.schedule.schedule(start_offset, task)
+            engine.task_start_times.update(temp_engine.task_start_times)   # = {}
+            engine.task_directives.update(temp_engine.task_directives)   # = {}
+            engine.task_inputs.update(temp_engine.task_inputs)   # = {}
+            engine.awaiting_conditions.extend(temp_engine.awaiting_conditions)  # = []
+            engine.awaiting_tasks.update(temp_engine.awaiting_tasks)   # = {}  # map from blocking task to blocked task
+            engine.spans.extend(temp_engine.spans)   # = []
+            print()
+
 
         # stale_tasks = {x.progeny for x in stale_reads if x.progeny not in deleted_tasks}
         # task_to_directive = {task: directive for directive, task in payload["plan_directive_to_task"].items()}
