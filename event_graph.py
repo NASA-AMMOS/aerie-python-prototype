@@ -107,3 +107,15 @@ class EventGraph:
         if type(event_graph) == EventGraph.Concurrently:
             return EventGraph.concurrently(EventGraph.filter_p(event_graph.left, predicate), EventGraph.filter_p(event_graph.right, predicate))
         raise ValueError("Not an event_graph: " + str(event_graph))
+
+    @staticmethod
+    def map(event_graph, f):
+        if type(event_graph) == EventGraph.Empty:
+            return event_graph
+        if type(event_graph) == EventGraph.Atom:
+            return EventGraph.atom(f(event_graph.value))
+        if type(event_graph) == EventGraph.Sequentially:
+            return EventGraph.sequentially(EventGraph.map(event_graph.prefix, f), EventGraph.map(event_graph.suffix, f))
+        if type(event_graph) == EventGraph.Concurrently:
+            return EventGraph.concurrently(EventGraph.map(event_graph.left, f), EventGraph.map(event_graph.right, f))
+        raise ValueError("Not an event_graph: " + str(event_graph))
