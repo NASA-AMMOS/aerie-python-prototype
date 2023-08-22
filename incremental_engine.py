@@ -3,13 +3,18 @@ from collections import namedtuple
 import inspect
 from typing import List, Tuple
 
-from protocol import Completed, Delay, AwaitCondition, Directive, Call, Plan, tuple_args, hashable_directive
+from protocol import Completed, Delay, AwaitCondition, Directive, Call, Plan, tuple_args, hashable_directive, \
+    restore_directive
 from event_graph import EventGraph
 
 Event = namedtuple("Event", "topic value progeny")
+
+# Event.__repr__ = lambda evt: f"{evt.topic}:{evt.value}{{{evt.progeny.__name__}}}"
+
 EventHistory = List[Tuple[int, EventGraph]]
 
-SPECIAL_READ_TOPIC = object()
+SPECIAL_READ_TOPIC = "READ"
+
 
 class SimulationEngine:
     def __init__(self):
@@ -185,29 +190,44 @@ def simulate(register_engine, model_class, plan):
         engine.elapsed_time = resume_time
         batch_event_graph = EventGraph.empty()
         for task in engine.schedule.get_next_batch():
-            task_status, event_graph = engine.step(task, TaskFrame(engine.elapsed_time, task=task, history=engine.events))
+            task_status, event_graph = engine.step(
+                task, TaskFrame(engine.elapsed_time, task=task, history=engine.events)
+            )
             batch_event_graph = EventGraph.concurrently(batch_event_graph, event_graph)
         if type(batch_event_graph) != EventGraph.Empty:
             if engine.events and engine.events[-1][0] == engine.elapsed_time:
-                engine.events[-1] = (engine.elapsed_time, EventGraph.sequentially(engine.events[-1][1], batch_event_graph))
+                engine.events[-1] = (
+                    engine.elapsed_time,
+                    EventGraph.sequentially(engine.events[-1][1], batch_event_graph),
+                )
             else:
                 engine.events.append((engine.elapsed_time, batch_event_graph))
         old_awaiting_conditions = list(engine.awaiting_conditions)
         engine.awaiting_conditions.clear()
+        condition_reads = EventGraph.empty()
         while old_awaiting_conditions:
             condition, task = old_awaiting_conditions.pop()
-            engine.current_task_frame = TaskFrame(engine.elapsed_time, history=engine.events)
+            engine.current_task_frame = TaskFrame(engine.elapsed_time, history=engine.events, task=task)
             if condition():
                 engine.schedule.schedule(engine.elapsed_time, task)
             else:
                 engine.awaiting_conditions.append((condition, task))
+            condition_reads = EventGraph.concurrently(condition_reads, engine.current_task_frame.collect())
+        if type(condition_reads) != EventGraph.Empty:
+            if engine.events and engine.events[-1][0] == engine.elapsed_time:
+                engine.events[-1] = (
+                    engine.elapsed_time,
+                    EventGraph.sequentially(engine.events[-1][1], condition_reads),
+                )
+            else:
+                engine.events.append((engine.elapsed_time, condition_reads))
 
     spans = sorted(engine.spans, key=lambda x: (x[1], x[2]))
     payload = {
         "events": list(engine.events),
         "spans": spans,
         "plan_directive_to_task": {hashable_directive(y): x for x, y in engine.task_directives.items()},
-        "task_children": engine.task_children
+        "task_children": engine.task_children,
     }
     filtered_spans = remove_task_from_spans(spans)
     return filtered_spans, without_read_events(engine.events), payload
@@ -243,22 +263,90 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
             deleted_tasks.extend(payload["task_children"][task])
             worklist.extend(payload["task_children"][task])
 
-    new_spans, new_events, _ = simulate(register_engine, model_class, Plan(added_directives))
+    deleted_events = []
+    for start_offset, event_graph in payload["events"]:
+        deleted = EventGraph.filter_p(event_graph, lambda evt: evt.progeny in deleted_tasks)
+        if type(deleted) != EventGraph.Empty:
+            deleted_events.append((start_offset, deleted))
+
+    # A read is stale if it contains a deleted event or a new event to one of its topics in its history
+
+    # TODO re-simulate stale reads
+    reads_and_deleted_events = EventGraph.empty()
+    for start_offset, event_graph in payload["events"]:
+        filtered = EventGraph.filter_p(event_graph, lambda evt: evt.topic == SPECIAL_READ_TOPIC or evt.progeny in deleted_tasks)
+        reads_and_deleted_events = EventGraph.sequentially(reads_and_deleted_events, filtered)
+
+    stale_reads = get_stale_reads(reads_and_deleted_events)
+    stale_tasks = {x.progeny for x in stale_reads if x.progeny not in deleted_tasks}
+    task_to_directive = {task: directive for directive, task in payload["plan_directive_to_task"].items()}
+    stale_directives = [restore_directive(task_to_directive[task]) for task in stale_tasks]
+
+    directives_to_simulate = added_directives + stale_directives
+
+    new_spans, new_events, _ = simulate(register_engine, model_class, Plan(directives_to_simulate))
 
     old_events_without_deleted_tasks = []
     for start_offset, event_graph in payload["events"]:
-        filtered = EventGraph.filter_p(event_graph, lambda evt: evt.progeny not in deleted_tasks)
+        filtered = EventGraph.filter_p(event_graph, lambda evt: evt.progeny not in deleted_tasks and evt.progeny not in stale_tasks)
         if type(filtered) != EventGraph.Empty:
             old_events_without_deleted_tasks.append((start_offset, filtered))
 
-    combined_events = sorted(old_events_without_deleted_tasks + new_events)
+    combined_events = collapse_simultaneous(
+        collapse_simultaneous(old_events_without_deleted_tasks, EventGraph.sequentially)
+        + collapse_simultaneous(new_events, EventGraph.sequentially),
+        EventGraph.concurrently,
+    )
 
     old_spans = list(payload["spans"])
 
     for deleted_directive in deleted_directives:
         old_spans = [x for x in old_spans if x[0] != deleted_directive]
     old_spans = [x for x in old_spans if x[0][2] not in deleted_tasks]
-    return sorted(remove_task_from_spans(old_spans) + new_spans, key=lambda x: (x[1], x[2])), without_read_events(combined_events), None
+    old_spans = [x for x in old_spans if x[0] not in stale_directives]
+    return (
+        sorted(remove_task_from_spans(old_spans) + new_spans, key=lambda x: (x[1], x[2])),
+        without_read_events(combined_events),
+        None,
+    )
+
+def get_stale_reads(event_graph):
+    stale_reads, stale_topics = get_stale_reads_helper(event_graph, set())
+    return stale_reads
+
+def get_stale_reads_helper(event_graph, stale_topics):
+    if type(event_graph) == EventGraph.Empty:
+        return [], stale_topics
+    if type(event_graph) == EventGraph.Atom:
+        if event_graph.value.topic == SPECIAL_READ_TOPIC and set(event_graph.value.value).intersection(stale_topics):
+            return [event_graph.value], stale_topics
+        elif event_graph.value.topic != SPECIAL_READ_TOPIC:
+            return [], stale_topics.union({event_graph.value.topic})
+        else:
+            return [], stale_topics
+    if type(event_graph) == EventGraph.Sequentially:
+        prefix_stale_reads, prefix_stale_topics = get_stale_reads_helper(event_graph.prefix, stale_topics)
+        suffix_stale_reads, suffix_stale_topics = get_stale_reads_helper(event_graph.suffix, stale_topics.union(prefix_stale_topics))
+        return prefix_stale_reads + suffix_stale_reads, prefix_stale_topics.union(suffix_stale_topics)
+    if type(event_graph) == EventGraph.Concurrently:
+        left_stale_reads, left_stale_topics = get_stale_reads_helper(event_graph.left, stale_topics)
+        right_stale_reads, right_stale_topics = get_stale_reads_helper(event_graph.right, stale_topics)
+        return left_stale_reads + right_stale_reads, left_stale_topics.union(right_stale_topics)
+    raise ValueError("Not an event_graph: " + str(event_graph))
+
+
+def collapse_simultaneous(history, combiner):
+    sorted_history = sorted(history, key=lambda x: x[0])
+    res = []
+    for start_offset, event_graph in sorted_history:
+        if not res:
+            res.append([start_offset, event_graph])
+        else:
+            if start_offset == res[-1][0]:
+                res[-1][1] = combiner(res[-1][1], event_graph)
+            else:
+                res.append([start_offset, event_graph])
+    return [tuple(x) for x in res]
 
 
 def diff(old_directives, new_directives):
@@ -280,6 +368,7 @@ def diff(old_directives, new_directives):
     deleted_directives = old_directives
     added_directives = new_directives
     return unchanged_directives, deleted_directives, added_directives
+
 
 def make_generator(f, arguments):
     if False:

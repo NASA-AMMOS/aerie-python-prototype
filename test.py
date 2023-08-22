@@ -155,6 +155,7 @@ def test_incremental_more_complex_add_only():
     def error_on_rerun(name):
         def foo(*args, **kwargs):
             raise ValueError("Reran " + str(name))
+        return foo
 
     def register_engine_with_error_activity(engine):
         register_engine(engine)
@@ -211,6 +212,7 @@ def test_incremental_more_complex_remove_only():
     def error_on_rerun(name):
         def foo(*args, **kwargs):
             raise ValueError("Reran " + str(name))
+        return foo
 
     def register_engine_with_error_activity(engine):
         register_engine(engine)
@@ -228,6 +230,62 @@ def test_incremental_more_complex_remove_only():
             [
                 Directive("my_other_activity", 10, {}),
                 Directive("my_activity", 20, {"param1": 5}),
+            ]
+        ),
+        old_plan,
+        payload
+    )
+
+    assert [(x, sim.EventGraph.to_string(y)) for x, y in actual_sim_events] == [(x, sim.EventGraph.to_string(y)) for x, y in expected_sim_events]
+    assert actual_spans == expected_spans
+
+
+def test_incremental_with_reads():
+    def register_engine(engine):
+        facade.sim_engine = engine
+
+    old_plan = Plan(
+        [
+            Directive("my_other_activity", 10, {}),
+            Directive("my_activity", 20, {"param1": 4}),
+            Directive("my_other_activity", 110, {}),
+            Directive("my_activity", 120, {"param1": 5}),
+        ]
+    )
+    _, _, payload = incremental_sim.simulate(register_engine, model.Model, old_plan)
+
+    expected_spans, expected_sim_events, _ = sim.simulate(
+        register_engine,
+        model.Model,
+        Plan(
+            [
+                Directive("my_other_activity", 10, {}),
+                Directive("my_activity", 20, {"param1": 4}),
+                Directive("my_other_activity", 110, {}),
+                Directive("my_activity", 119, {"param1": 5}),
+            ]
+        ),
+    )
+
+    def register_engine_with_error_activity(engine):
+        register_engine(engine)
+        real_my_activity = engine.activity_types_by_name["my_activity"]
+        def fake_my_activity(model, param1):
+            if param1 == 4:
+                raise ValueError("Resimulated unchanged activity!")
+            for task_status in real_my_activity(model, param1):
+                yield task_status
+        engine.activity_types_by_name["my_activity"] = fake_my_activity
+
+    actual_spans, actual_sim_events, _ = incremental_sim.simulate_incremental(
+        register_engine_with_error_activity,
+        model.Model,
+        Plan(
+            [
+                Directive("my_other_activity", 10, {}),
+                Directive("my_activity", 20, {"param1": 4}),
+                Directive("my_other_activity", 110, {}),
+                Directive("my_activity", 119, {"param1": 5}),
             ]
         ),
         old_plan,

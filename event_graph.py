@@ -32,11 +32,14 @@ class EventGraph:
         return EventGraph.Concurrently(left, right)
 
     @staticmethod
-    def to_string(event_graph, parent=None):
+    def to_string(event_graph, parent=None, str=False):
         if type(event_graph) == EventGraph.Empty:
             return ""
         if type(event_graph) == EventGraph.Atom:
-            return f"{event_graph.value.topic}={event_graph.value.value}"
+            if str:
+                return str(event_graph.value)
+            else:
+                return f"{event_graph.value.topic}={event_graph.value.value}"
         if type(event_graph) == EventGraph.Sequentially:
             res = f"{EventGraph.to_string(event_graph.prefix, parent=type(event_graph))};{EventGraph.to_string(event_graph.suffix, parent=type(event_graph))}"
             if parent == EventGraph.Concurrently:
