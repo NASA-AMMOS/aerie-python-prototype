@@ -1,3 +1,4 @@
+from event_graph import EventGraph
 from sim import Register, Accumulator, Delay, AwaitCondition, spawn, Call
 
 
@@ -44,6 +45,19 @@ def callee_activity(model: "Model", value):
     model.x.set(value)
 
 
+def emit_event(model, topic, value, _):
+    import sim as facade
+    facade.sim_engine.current_task_frame.emit(topic, value)
+
+
+def read_topic(model, topic, _):
+    import sim as facade
+    res = []
+    for start_offset, events in facade.sim_engine.current_task_frame.read(topic):
+        res.append((start_offset, EventGraph.to_string(events)))
+    facade.sim_engine.current_task_frame.emit("history", res)
+
+
 class Model:
     def __init__(self):
         self.x = Register("x", 55)
@@ -59,6 +73,8 @@ class Model:
             my_other_activity,
             my_decomposing_activity,
             caller_activity,
-            callee_activity
+            callee_activity,
+            emit_event,
+            read_topic
         ]
         return {x.__name__: x for x in activity_types}
