@@ -176,7 +176,7 @@ class JobSchedule:
         return len(self._schedule) == 0
 
 
-def simulate(register_engine, model_class, plan):
+def simulate(register_engine, model_class, plan, old_events = []):
     engine = SimulationEngine()
     engine.register_model(model_class)
     register_engine(engine)
@@ -188,7 +188,18 @@ def simulate(register_engine, model_class, plan):
     while not engine.schedule.is_empty():
         resume_time = engine.schedule.peek_next_time()
         engine.elapsed_time = resume_time
+
+        while old_events and old_events[0][0] < resume_time:
+            engine.events.append(old_events.pop(0))
+
         batch_event_graph = EventGraph.empty()
+
+        if old_events and old_events[0][0] == resume_time:
+            batch_event_graph = EventGraph.concurrently(batch_event_graph, old_events.pop(0)[1])
+
+        if old_events and old_events[0][0] == resume_time:
+            raise ValueError("Duplicate resume time in old_events:", resume_time)
+
         for task in engine.schedule.get_next_batch():
             task_status, event_graph = engine.step(
                 task, TaskFrame(engine.elapsed_time, task=task, history=engine.events)
@@ -221,6 +232,8 @@ def simulate(register_engine, model_class, plan):
                 )
             else:
                 engine.events.append((engine.elapsed_time, condition_reads))
+
+    engine.events.extend(old_events)
 
     spans = sorted(engine.spans, key=lambda x: (x[1], x[2]))
     payload = {
@@ -284,19 +297,13 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
 
     directives_to_simulate = added_directives + stale_directives
 
-    new_spans, new_events, _ = simulate(register_engine, model_class, Plan(directives_to_simulate))
-
     old_events_without_deleted_tasks = []
     for start_offset, event_graph in payload["events"]:
         filtered = EventGraph.filter_p(event_graph, lambda evt: evt.progeny not in deleted_tasks and evt.progeny not in stale_tasks)
         if type(filtered) != EventGraph.Empty:
             old_events_without_deleted_tasks.append((start_offset, filtered))
 
-    combined_events = collapse_simultaneous(
-        collapse_simultaneous(old_events_without_deleted_tasks, EventGraph.sequentially)
-        + collapse_simultaneous(new_events, EventGraph.sequentially),
-        EventGraph.concurrently,
-    )
+    new_spans, new_events, _ = simulate(register_engine, model_class, Plan(directives_to_simulate), old_events=old_events_without_deleted_tasks)
 
     old_spans = list(payload["spans"])
 
@@ -306,7 +313,7 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
     old_spans = [x for x in old_spans if x[0] not in stale_directives]
     return (
         sorted(remove_task_from_spans(old_spans) + new_spans, key=lambda x: (x[1], x[2])),
-        without_read_events(combined_events),
+        without_read_events(collapse_simultaneous(new_events, EventGraph.sequentially)),
         None,
     )
 
