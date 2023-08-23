@@ -226,7 +226,7 @@ def test_incremental_with_reads_made_stale_dynamically_with_durative_activities(
     )
 
 
-def test_incremental_child_activity():
+def test_incremental_called_activity():
     """
     Parent -> child
     child reads x and delays for x
@@ -250,6 +250,54 @@ def test_incremental_child_activity():
             ]
         ),
         {"emit_event": error_on_rerun("emit_event", lambda kwargs: kwargs["_"] == 10)},
+    )
+
+
+def test_incremental_deleted_read():
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("emit_event", 2, {"topic": "x", "value": 1, "_": 10}),
+                Directive("emit_if_x_equal", 3, {"x_value": 1, "topic": "z", "value_to_emit": 1, "_": 10}),
+                Directive("read_topic", 5, {"topic": "z", "_": 1}),
+            ]
+        ),
+        Plan(
+            [
+                Directive("emit_event", 2, {"topic": "x", "value": 2, "_": 10}),
+                Directive("emit_if_x_equal", 3, {"x_value": 1, "topic": "z", "value_to_emit": 1, "_": 10}),
+                Directive("read_topic", 5, {"topic": "z", "_": 1}),
+            ]
+        ),
+        {}
+    )
+
+
+def test_incremental_spawned_activity():
+    """
+    Parent -> child
+    child reads x and delays for x
+
+    Change plan with a new write to x
+
+    Parent should emit its second event later
+    """
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("emit_event", 2, {"topic": "z", "value": 1, "_": 10}),
+                Directive("spawns_reading_child", 10, {}),
+            ]
+        ),
+        Plan(
+            [
+                Directive("emit_event", 2, {"topic": "z", "value": 1, "_": 10}),
+                Directive("emit_event", 5, {"topic": "x", "value": 1, "_": 1}),
+                Directive("spawns_reading_child", 10, {}),
+            ]
+        ),
+        {"emit_event": error_on_rerun("emit_event", lambda kwargs: kwargs["_"] == 10),
+         "spawns_reading_child": error_on_rerun("spawns_reading_child")},
     )
 
 

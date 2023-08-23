@@ -14,11 +14,14 @@ Event = namedtuple("Event", "topic value progeny")
 EventHistory = List[Tuple[int, EventGraph]]
 
 SPECIAL_READ_TOPIC = "READ"
+SPECIAL_SPAWN_TOPIC = "SPAWN"
+make_finish_topic = lambda x: ("FINISH", x)
 
 
 class SimulationEngine:
     def __init__(self):
-        self.task_children = {}
+        self.task_children_spawned = {}
+        self.task_children_called = {}
         self.elapsed_time = 0
         self.events: EventHistory = []  # list of tuples (start_offset, event_graph)
         self.current_task_frame = None  # created by step
@@ -43,14 +46,21 @@ class SimulationEngine:
         self.task_directives[task] = Directive(directive_type, self.elapsed_time, arguments)
         self.spawn_task(task)
 
-    def spawn_task(self, task):
+    def spawn_task(self, task, is_call=False):
         self.task_start_times[task] = self.elapsed_time
         parent_task_frame = self.current_task_frame
-        task_status, events = self.step(task, TaskFrame(self.elapsed_time, task=task, history=self.events))
+        task_frame = TaskFrame(self.elapsed_time, task=task, history=self.events)
+        task_frame.emit(SPECIAL_SPAWN_TOPIC, task)
+        task_status, events = self.step(task, task_frame)
         if parent_task_frame.task is not None:
-            if parent_task_frame.task not in self.task_children:
-                self.task_children[parent_task_frame.task] = []
-            self.task_children[parent_task_frame.task].append(task)
+            if is_call:
+                if parent_task_frame.task not in self.task_children_called:
+                    self.task_children_called[parent_task_frame.task] = []
+                self.task_children_called[parent_task_frame.task].append(task)
+            else:
+                if parent_task_frame.task not in self.task_children_spawned:
+                    self.task_children_spawned[parent_task_frame.task] = []
+                self.task_children_spawned[parent_task_frame.task].append(task)
         parent_task_frame.spawn(events)
         self.current_task_frame = parent_task_frame
 
@@ -65,6 +75,7 @@ class SimulationEngine:
     def step(self, task, task_frame):
         restore = self.current_task_frame
         self.current_task_frame = task_frame
+        resuming_caller_task = None
         try:
             task_status = next(task)
         except StopIteration:
@@ -85,18 +96,22 @@ class SimulationEngine:
             )
             if task in self.awaiting_tasks:
                 self.schedule.schedule(self.elapsed_time, self.awaiting_tasks[task])
+                resuming_caller_task = self.awaiting_tasks[task]
+                task_frame.emit(make_finish_topic(task), "FINISHED")
                 del self.awaiting_tasks[task]
         elif type(task_status) == Call:
             child_task = make_task(self.model, task_status.child_task, task_status.args)
             self.awaiting_tasks[child_task] = task
             self.task_inputs[child_task] = (task_status.child_task, task_status.args)
             self.task_directives[child_task] = Directive(task_status.child_task, self.elapsed_time, task_status.args)
-            self.spawn_task(child_task)
+            self.spawn_task(child_task, is_call=True)
         else:
             raise ValueError("Unhandled task status: " + str(task_status))
         self.current_task_frame = restore
-        return task_status, task_frame.collect()
-
+        if resuming_caller_task is None:
+            return task_status, task_frame.collect()
+        else:
+            return task_status, EventGraph.sequentially(task_frame.collect(), EventGraph.Atom(Event(SPECIAL_READ_TOPIC, [make_finish_topic(task)], resuming_caller_task)))
 
 class TaskFrame:
     Branch = namedtuple("Branch", "base event_graph")
@@ -180,15 +195,17 @@ class JobSchedule:
         return len(self._schedule) == 0
 
 
-def simulate(register_engine, model_class, plan, stop_time=None, old_events=None, deleted_tasks=None, old_task_directives=None, old_task_parent=None):
+def simulate(register_engine, model_class, plan, stop_time=None, old_events=None, deleted_tasks=None, old_task_directives=None, old_task_parent_spawned=None, old_task_parent_called=None):
     if old_events is None:
         old_events = []
     if deleted_tasks is None:
         deleted_tasks = set()
     if old_task_directives is None:
         old_task_directives = {}
-    if old_task_parent is None:
-        old_task_parent = {}
+    if old_task_parent_spawned is None:
+        old_task_parent_spawned = {}
+    if old_task_parent_called is None:
+        old_task_parent_called = {}
     engine = SimulationEngine()
     engine.register_model(model_class)
     register_engine(engine)
@@ -239,16 +256,18 @@ def simulate(register_engine, model_class, plan, stop_time=None, old_events=None
             worklist = list(newly_stale_readers)
             while worklist:
                 reader = worklist.pop(0)
-                if reader in old_task_parent:
+                if reader in old_task_parent_called:
                     # If the stale read is in a child activity, restart the parent???
                     # Can we do better??? Can we use the spans?
-                    newly_stale_readers.add(old_task_parent[reader])
-                    worklist.append(old_task_parent[reader])
+                    newly_stale_readers.add(old_task_parent_called[reader])
+                    worklist.append(old_task_parent_called[reader])
 
             deleted_tasks.update(newly_stale_readers)
             # Filter out all events from these tasks in the future
+            invalidated_topics = set()
             for i in range(len(old_events)):
                 start_offset, event_graph = old_events[i]
+                invalidated_topics.update(EventGraph.to_set(EventGraph.filter_p(event_graph, lambda evt: evt.progeny in newly_stale_readers), lambda evt: evt.topic))
                 old_events[i] = (start_offset, EventGraph.filter_p(event_graph, lambda evt: evt.progeny not in newly_stale_readers))
             old_events = [x for x in old_events if type(x[1]) != EventGraph.Empty]
 
@@ -260,13 +279,14 @@ def simulate(register_engine, model_class, plan, stop_time=None, old_events=None
 
             directives_to_simulate = []
             for reader_task in newly_stale_readers:
-                if reader_task not in old_task_parent:
+                if reader_task not in old_task_parent_called:
                     directives_to_simulate.append(old_task_directives[reader_task])
                 else:
                     pass  # The parents for these should already be included in newly_stale_readers
             _, _, _ = simulate(local_register_engine, model_class, Plan(directives_to_simulate), stop_time=engine.elapsed_time)
             register_engine(engine)  # restore the main engine
-            engine.task_children.update(temp_engine.task_children)   # = {}
+            engine.task_children_called.update(temp_engine.task_children_called)   # = {}
+            engine.task_children_spawned.update(temp_engine.task_children_spawned)  # = {}
             while not temp_engine.schedule.is_empty():
                 start_offset = temp_engine.schedule.peek_next_time()
                 for task in temp_engine.schedule.get_next_batch():
@@ -307,12 +327,14 @@ def simulate(register_engine, model_class, plan, stop_time=None, old_events=None
         "spans": spans,
         "plan_directive_to_task": {hashable_directive(y): x for x, y in engine.task_directives.items()},
         "task_directives": engine.task_directives,
-        "task_children": engine.task_children,
-        "task_parent": {child: parent for parent, children in engine.task_children.items() for child in children},
+        "task_children_called": engine.task_children_called,
+        "task_children_spawned": engine.task_children_spawned,
+        "task_parent_called": {child: parent for parent, children in engine.task_children_called.items() for child in children},
+        "task_parent_spawned": {child: parent for parent, children in engine.task_children_spawned.items() for child in children},
         "deleted_tasks": deleted_tasks
     }
     filtered_spans = remove_task_from_spans(spans)
-    return filtered_spans, without_read_events(engine.events), payload
+    return filtered_spans, without_special_events(engine.events), payload
 
 
 def remove_task_from_spans(spans):
@@ -325,10 +347,10 @@ def remove_task_from_spans(spans):
     return filtered_spans
 
 
-def without_read_events(events):
+def without_special_events(events):
     non_read_events = []
     for x, y in events:
-        filtered = EventGraph.filter_p(y, lambda evt: evt.topic != SPECIAL_READ_TOPIC)
+        filtered = EventGraph.filter_p(y, lambda evt: evt.topic not in (SPECIAL_READ_TOPIC, SPECIAL_SPAWN_TOPIC) and not (type(evt.topic) == tuple and evt.topic[0] == "FINISH"))
         if type(filtered) != EventGraph.Empty:
             non_read_events.append((x, filtered))
     return non_read_events
@@ -341,9 +363,12 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
     worklist = list(deleted_tasks)
     while worklist:
         task = worklist.pop()
-        if task in payload["task_children"]:
-            deleted_tasks.extend(payload["task_children"][task])
-            worklist.extend(payload["task_children"][task])
+        if task in payload["task_children_spawned"]:
+            deleted_tasks.extend(payload["task_children_spawned"][task])
+            worklist.extend(payload["task_children_spawned"][task])
+        if task in payload["task_children_called"]:
+            deleted_tasks.extend(payload["task_children_called"][task])
+            worklist.extend(payload["task_children_called"][task])
 
     deleted_events = []
     for start_offset, event_graph in payload["events"]:
@@ -375,7 +400,7 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
     new_spans, new_events, new_payload = simulate(
         register_engine,
         model_class,
-        Plan(directives_to_simulate), old_events=old_events_without_deleted_tasks, deleted_tasks=set(deleted_tasks), old_task_directives=payload["task_directives"], old_task_parent=payload["task_parent"])
+        Plan(directives_to_simulate), old_events=old_events_without_deleted_tasks, deleted_tasks=set(deleted_tasks), old_task_directives=payload["task_directives"], old_task_parent_called=payload["task_parent_called"], old_task_parent_spawned=payload["task_parent_spawned"])
 
     old_spans = list(payload["spans"])
 
@@ -390,7 +415,7 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
     old_spans = [x for x in old_spans if x[0] not in stale_directives]
     return (
         sorted(remove_task_from_spans(old_spans) + new_spans, key=lambda x: (x[1], x[2])),
-        without_read_events(collapse_simultaneous(new_events, EventGraph.sequentially)),
+        without_special_events(collapse_simultaneous(new_events, EventGraph.sequentially)),
         None,
     )
 

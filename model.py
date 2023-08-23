@@ -95,6 +95,19 @@ def reading_child(model):
     yield Delay(model.x.get())
 
 
+def spawns_reading_child(model):
+    import sim as facade
+    facade.sim_engine.current_task_frame.emit("y", 1)
+    spawn("reading_child", {})
+    facade.sim_engine.current_task_frame.emit("y", 2)
+
+
+def emit_if_x_equal(model, x_value, topic, value_to_emit, _):
+    import sim as facade
+    if model.x.get() == x_value:
+        facade.sim_engine.current_task_frame.emit(topic, value_to_emit)
+
+
 class Model:
     def __init__(self):
         self.x = Register("x", 55)
@@ -117,6 +130,8 @@ class Model:
             emit_then_read,
             read_emit_three_times,
             parent_of_reading_child,
-            reading_child
+            reading_child,
+            spawns_reading_child,
+            emit_if_x_equal
         ]
         return {x.__name__: x for x in activity_types}
