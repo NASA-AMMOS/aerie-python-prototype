@@ -1,5 +1,3 @@
-import pytest
-
 import engine as sim
 import incremental_engine as incremental_sim
 import model
@@ -80,11 +78,6 @@ def test_incremental_baseline():
 
 
 def test_incremental():
-    def error_on_rerun_callee_activity(model: "Model", value):
-        if value == 1:
-            raise Exception("Incremental simulation reran callee_activity with value " + str(value))
-        return model_.callee_activity(model, value)
-
     incremental_sim_test_case(
         Plan(
             [
@@ -98,13 +91,16 @@ def test_incremental():
                 Directive("callee_activity", 15, {"value": 3}),  # Changed value only
             ]
         ),
-        {"callee_activity": error_on_rerun_callee_activity},
+        {"callee_activity": error_on_rerun("callee_activity", lambda args: args["value"] == 1)},
     )
 
 
-def error_on_rerun(name):
-    def foo(*args, **kwargs):
-        raise ValueError("Reran " + str(name))
+def error_on_rerun(name, predicate=lambda kwargs: True):
+    def foo(model, **kwargs):
+        if predicate(kwargs):
+            raise ValueError("Reran " + str(name))
+        for x in incremental_sim.make_task(model_.Model(), name, kwargs):
+            yield x
 
     return foo
 
@@ -150,14 +146,6 @@ def test_incremental_more_complex_remove_only():
 
 
 def test_incremental_with_reads():
-    real_my_activity = model_.my_activity
-
-    def fake_my_activity(model, param1):
-        if param1 == 4:
-            raise ValueError("Resimulated unchanged activity!")
-        for task_status in real_my_activity(model, param1):
-            yield task_status
-
     incremental_sim_test_case(
         Plan(
             [
@@ -175,19 +163,11 @@ def test_incremental_with_reads():
                 Directive("my_activity", 119, {"param1": 5}),
             ]
         ),
-        {"my_activity": fake_my_activity},
+        {"my_activity": error_on_rerun("my_activity", lambda kwargs: kwargs["param1"] == 4)},
     )
 
 
 def test_incremental_with_new_reads_of_old_topics():
-    real_my_activity = model_.my_activity
-
-    def fake_my_activity(model, param1):
-        if param1 == 4:
-            raise ValueError("Resimulated unchanged activity!")
-        for task_status in real_my_activity(model, param1):
-            yield task_status
-
     incremental_sim_test_case(
         Plan(
             [
@@ -202,19 +182,11 @@ def test_incremental_with_new_reads_of_old_topics():
                 Directive("read_topic", 16, {"topic": "x", "_": 2}),
             ]
         ),
-        {"my_activity": fake_my_activity},
+        {"my_activity": error_on_rerun("my_activity", lambda kwargs: kwargs["param1"] == 4)},
     )
 
 
 def test_incremental_with_reads_made_stale_dynamically():
-    real_my_activity = model_.my_activity
-
-    def fake_my_activity(model, param1):
-        if param1 == 4:
-            raise ValueError("Resimulated unchanged activity!")
-        for task_status in real_my_activity(model, param1):
-            yield task_status
-
     incremental_sim_test_case(
         Plan(
             [
@@ -229,20 +201,11 @@ def test_incremental_with_reads_made_stale_dynamically():
                 Directive("read_topic", 15, {"topic": "x", "_": 1}),
             ]
         ),
-        {"my_activity": fake_my_activity},
+        {}
     )
 
 
 def test_incremental_with_reads_made_stale_dynamically_with_durative_activities():
-    overrides = {}
-
-    def fake_emit_event(model, **kwargs):
-        if kwargs["_"] == 1:
-            raise ValueError("Resimulated unchanged activity!")
-        return model_.emit_event(model, **kwargs)
-
-    overrides["emit_event"] = fake_emit_event
-
     incremental_sim_test_case(
         Plan(
             [
@@ -259,7 +222,7 @@ def test_incremental_with_reads_made_stale_dynamically_with_durative_activities(
                 Directive("read_topic", 30, {"topic": "y", "_": 1}),
             ]
         ),
-        overrides,
+        {"emit_event": error_on_rerun("emit_event", lambda args: args["_"] == 1)},
     )
 
 
@@ -275,16 +238,18 @@ def test_incremental_child_activity():
     incremental_sim_test_case(
         Plan(
             [
+                Directive("emit_event", 2, {"topic": "z", "value": 1, "_": 10}),
                 Directive("parent_of_reading_child", 10, {}),
             ]
         ),
         Plan(
             [
+                Directive("emit_event", 2, {"topic": "z", "value": 1, "_": 10}),
                 Directive("emit_event", 5, {"topic": "x", "value": 1, "_": 1}),
                 Directive("parent_of_reading_child", 10, {}),
             ]
         ),
-        {"parent_of_reading_child": error_on_rerun("parent_of_reading_child")},
+        {"emit_event": error_on_rerun("emit_event", lambda kwargs: kwargs["_"] == 10)},
     )
 
 
