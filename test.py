@@ -298,8 +298,13 @@ def incremental_sim_test_case(old_plan, new_plan, overrides):
 
     def register_engine_with_error_activity(engine):
         register_engine(engine)
-        for name, impl in overrides.items():
-            engine.activity_types_by_name[name] = impl
+
+        def spoofed_get_activity_types():
+            activity_types = dict(model_.Model().get_activity_types())
+            activity_types.update(overrides)
+            return activity_types
+
+        engine.model.get_activity_types = spoofed_get_activity_types
 
     actual_spans, actual_sim_events, _ = incremental_sim.simulate_incremental(
         register_engine_with_error_activity, model.Model, new_plan, old_plan, payload
