@@ -124,6 +124,11 @@ def parent_of_conditional_decomposition(model, _):
     facade.sim_engine.current_task_frame.emit("q", 1)
     yield Call("conditional_decomposition", {"_": _})
 
+def parent_of_parent_of_conditional_decomposition(model, _):
+    import sim as facade
+    facade.sim_engine.current_task_frame.emit("q", -1)
+    spawn("parent_of_conditional_decomposition", {"_": _})
+
 
 class Model:
     def __init__(self):
@@ -151,6 +156,7 @@ class Model:
             spawns_reading_child,
             emit_if_x_equal,
             conditional_decomposition,
-            parent_of_conditional_decomposition
+            parent_of_conditional_decomposition,
+            parent_of_parent_of_conditional_decomposition
         ]
         return {x.__name__: x for x in activity_types}

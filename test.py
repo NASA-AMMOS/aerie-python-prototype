@@ -105,7 +105,7 @@ def error_on_rerun(name, predicate=lambda kwargs: True):
     return foo
 
 
-def test_incremental_more_complex_add_only():
+def test_more_complex_add_only():
     incremental_sim_test_case(
         Plan(
             [
@@ -126,7 +126,7 @@ def test_incremental_more_complex_add_only():
     )
 
 
-def test_incremental_more_complex_remove_only():
+def test_more_complex_remove_only():
     incremental_sim_test_case(
         Plan(
             [
@@ -145,7 +145,7 @@ def test_incremental_more_complex_remove_only():
     )
 
 
-def test_incremental_with_reads():
+def test_with_reads():
     incremental_sim_test_case(
         Plan(
             [
@@ -167,7 +167,7 @@ def test_incremental_with_reads():
     )
 
 
-def test_incremental_with_new_reads_of_old_topics():
+def test_with_new_reads_of_old_topics():
     incremental_sim_test_case(
         Plan(
             [
@@ -186,7 +186,7 @@ def test_incremental_with_new_reads_of_old_topics():
     )
 
 
-def test_incremental_with_reads_made_stale_dynamically():
+def test_with_reads_made_stale_dynamically():
     incremental_sim_test_case(
         Plan(
             [
@@ -205,7 +205,7 @@ def test_incremental_with_reads_made_stale_dynamically():
     )
 
 
-def test_incremental_with_reads_made_stale_dynamically_with_durative_activities():
+def test_with_reads_made_stale_dynamically_with_durative_activities():
     incremental_sim_test_case(
         Plan(
             [
@@ -226,7 +226,7 @@ def test_incremental_with_reads_made_stale_dynamically_with_durative_activities(
     )
 
 
-def test_incremental_called_activity():
+def test_called_activity():
     """
     Parent -> child
     child reads x and delays for x
@@ -253,7 +253,7 @@ def test_incremental_called_activity():
     )
 
 
-def test_incremental_deleted_read():
+def test_deleted_read():
     incremental_sim_test_case(
         Plan(
             [
@@ -273,7 +273,7 @@ def test_incremental_deleted_read():
     )
 
 
-def test_incremental_conditional_decomposition():
+def test_conditional_decomposition():
     incremental_sim_test_case(
         Plan(
             [
@@ -290,7 +290,7 @@ def test_incremental_conditional_decomposition():
         {}
     )
 
-def test_incremental_conditional_decomposition_2():
+def test_conditional_decomposition_2():
     incremental_sim_test_case(
         Plan(
             [
@@ -307,8 +307,44 @@ def test_incremental_conditional_decomposition_2():
         {}
     )
 
+def test_conditional_decomposition_3():
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("emit_event", 2, {"topic": "x", "value": 1, "_": 1}),
+                Directive("parent_of_parent_of_conditional_decomposition", 3, {"_": 2}),
+            ]
+        ),
+        Plan(
+            [
+                Directive("emit_event", 2, {"topic": "x", "value": 2, "_": 1}),
+                Directive("parent_of_parent_of_conditional_decomposition", 3, {"_": 2}),
+            ]
+        ),
+        {}
+    )
 
-def test_incremental_spawned_activity():
+
+def test_read_becomes_unstale():
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("emit_event", 2, {"topic": "x", "value": 1, "_": 1}),
+                Directive("emit_if_x_equal", 5, {"x_value": 1, "topic": "z", "value_to_emit": 1, "_": 3}),
+            ]
+        ),
+        Plan(
+            [
+                Directive("emit_event", 2, {"topic": "x", "value": 1, "_": 1}),
+                Directive("emit_event", 3, {"topic": "x", "value": 1, "_": 2}),
+                Directive("emit_if_x_equal", 5, {"x_value": 1, "topic": "z", "value_to_emit": 1, "_": 3}),
+            ]
+        ),
+        {"emit_if_x_equal": error_on_rerun("emit_if_x_equal")}
+    )
+
+
+def test_spawned_activity():
     """
     Parent -> child
     child reads x and delays for x
