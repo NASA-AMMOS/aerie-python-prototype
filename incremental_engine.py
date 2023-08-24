@@ -253,6 +253,7 @@ def simulate(register_engine, model_class, plan, stop_time=None, old_events=None
             newly_stale_readers.update(EventGraph.to_set(filtered, lambda evt: evt.progeny))
 
         if newly_stale_readers:
+            # while newly_stale_readers:
             worklist = list(newly_stale_readers)
             while worklist:
                 reader = worklist.pop(0)
@@ -270,6 +271,16 @@ def simulate(register_engine, model_class, plan, stop_time=None, old_events=None
                 invalidated_topics.update(EventGraph.to_set(EventGraph.filter_p(event_graph, lambda evt: evt.progeny in newly_stale_readers), lambda evt: evt.topic))
                 old_events[i] = (start_offset, EventGraph.filter_p(event_graph, lambda evt: evt.progeny not in newly_stale_readers))
             old_events = [x for x in old_events if type(x[1]) != EventGraph.Empty]
+
+            # TODO: recursively find stale reads resulting from these deleted events
+            # newly_stale_readers = set()
+            # for start_offset, event_graph in old_events:
+            #     filtered = EventGraph.filter_p(event_graph, lambda
+            #         evt: evt.topic == SPECIAL_READ_TOPIC and evt.progeny not in deleted_tasks and set(
+            #         evt.value).intersection(invalidated_topics))
+            #     newly_stale_readers.update(EventGraph.to_set(filtered, lambda evt: evt.progeny))
+
+                # TODO What about events emitted by children?
 
             temp_engine: Optional[SimulationEngine] = None
             def local_register_engine(engine):
@@ -370,22 +381,33 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
             deleted_tasks.extend(payload["task_children_called"][task])
             worklist.extend(payload["task_children_called"][task])
 
-    deleted_events = []
-    for start_offset, event_graph in payload["events"]:
-        deleted = EventGraph.filter_p(event_graph, lambda evt: evt.progeny in deleted_tasks)
-        if type(deleted) != EventGraph.Empty:
-            deleted_events.append((start_offset, deleted))
+    first = True
 
-    # A read is stale if it contains a deleted event or a new event to one of its topics in its history
+    stale_tasks = set()
 
-    # TODO re-simulate stale reads
-    reads_and_deleted_events = EventGraph.empty()
-    for start_offset, event_graph in payload["events"]:
-        filtered = EventGraph.filter_p(event_graph, lambda evt: evt.topic == SPECIAL_READ_TOPIC or evt.progeny in deleted_tasks)
-        reads_and_deleted_events = EventGraph.sequentially(reads_and_deleted_events, filtered)
+    new_stale_tasks = set()
 
-    stale_reads = get_stale_reads(reads_and_deleted_events)
-    stale_tasks = {x.progeny for x in stale_reads if x.progeny not in deleted_tasks}
+    while first or new_stale_tasks:
+        first = False
+
+        deleted_events = []
+        for start_offset, event_graph in payload["events"]:
+            deleted = EventGraph.filter_p(event_graph, lambda evt: evt.progeny in deleted_tasks or evt.progeny in stale_tasks)
+            if type(deleted) != EventGraph.Empty:
+                deleted_events.append((start_offset, deleted))
+
+        # A read is stale if it contains a deleted event or a new event to one of its topics in its history
+
+        # TODO re-simulate stale reads
+        reads_and_deleted_events = EventGraph.empty()
+        for start_offset, event_graph in payload["events"]:
+            filtered = EventGraph.filter_p(event_graph, lambda evt: evt.topic == SPECIAL_READ_TOPIC or evt.progeny in deleted_tasks or evt.progeny in stale_tasks)
+            reads_and_deleted_events = EventGraph.sequentially(reads_and_deleted_events, filtered)
+
+        stale_reads = get_stale_reads(reads_and_deleted_events)
+        new_stale_tasks = {x.progeny for x in stale_reads if x.progeny not in deleted_tasks and x.progeny not in stale_tasks}
+        stale_tasks.update(new_stale_tasks)
+
     task_to_directive = {task: directive for directive, task in payload["plan_directive_to_task"].items()}
     stale_directives = [restore_directive(task_to_directive[task]) for task in stale_tasks]
 
