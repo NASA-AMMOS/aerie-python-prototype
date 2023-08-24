@@ -3,8 +3,17 @@ from collections import namedtuple
 import inspect
 from typing import List, Tuple, Optional
 
-from protocol import Completed, Delay, AwaitCondition, Directive, Call, Plan, tuple_args, hashable_directive, \
-    restore_directive
+from protocol import (
+    Completed,
+    Delay,
+    AwaitCondition,
+    Directive,
+    Call,
+    Plan,
+    tuple_args,
+    hashable_directive,
+    restore_directive,
+)
 from event_graph import EventGraph
 
 Event = namedtuple("Event", "topic value progeny")
@@ -87,9 +96,7 @@ class SimulationEngine:
         elif type(task_status) == Completed:
             self.spans.append(
                 (
-                    self.task_directives.get(
-                        task, (self.task_inputs[task][0], self.task_inputs[task][1], task)
-                    ),
+                    self.task_directives.get(task, (self.task_inputs[task][0], self.task_inputs[task][1], task)),
                     self.task_start_times[task],
                     self.elapsed_time,
                 )
@@ -111,7 +118,11 @@ class SimulationEngine:
         if resuming_caller_task is None:
             return task_status, task_frame.collect()
         else:
-            return task_status, EventGraph.sequentially(task_frame.collect(), EventGraph.Atom(Event(SPECIAL_READ_TOPIC, [make_finish_topic(task)], resuming_caller_task)))
+            return task_status, EventGraph.sequentially(
+                task_frame.collect(),
+                EventGraph.Atom(Event(SPECIAL_READ_TOPIC, [make_finish_topic(task)], resuming_caller_task)),
+            )
+
 
 class TaskFrame:
     Branch = namedtuple("Branch", "base event_graph")
@@ -195,7 +206,19 @@ class JobSchedule:
         return len(self._schedule) == 0
 
 
-def simulate(register_engine, model_class, plan, stop_time=None, old_events=None, deleted_tasks=None, old_task_directives=None, old_task_parent_spawned=None, old_task_parent_called=None, old_task_children_spawned=None, old_task_children_called=None):
+def simulate(
+    register_engine,
+    model_class,
+    plan,
+    stop_time=None,
+    old_events=None,
+    deleted_tasks=None,
+    old_task_directives=None,
+    old_task_parent_spawned=None,
+    old_task_parent_called=None,
+    old_task_children_spawned=None,
+    old_task_children_called=None,
+):
     if old_events is None:
         old_events = []
     if deleted_tasks is None:
@@ -253,7 +276,12 @@ def simulate(register_engine, model_class, plan, stop_time=None, old_events=None
         # TODO re-simulate stale reads
         newly_stale_readers = set()
         for start_offset, event_graph in old_events:
-            filtered = EventGraph.filter_p(event_graph, lambda evt: evt.topic == SPECIAL_READ_TOPIC and evt.progeny not in deleted_tasks and set(evt.value).intersection(newly_invalidated_topics))
+            filtered = EventGraph.filter_p(
+                event_graph,
+                lambda evt: evt.topic == SPECIAL_READ_TOPIC
+                and evt.progeny not in deleted_tasks
+                and set(evt.value).intersection(newly_invalidated_topics),
+            )
             newly_stale_readers.update(EventGraph.to_set(filtered, lambda evt: evt.progeny))
 
         if newly_stale_readers:
@@ -278,8 +306,16 @@ def simulate(register_engine, model_class, plan, stop_time=None, old_events=None
             invalidated_topics = set()
             for i in range(len(old_events)):
                 start_offset, event_graph = old_events[i]
-                invalidated_topics.update(EventGraph.to_set(EventGraph.filter_p(event_graph, lambda evt: evt.progeny in newly_stale_readers), lambda evt: evt.topic))
-                old_events[i] = (start_offset, EventGraph.filter_p(event_graph, lambda evt: evt.progeny not in newly_stale_readers))
+                invalidated_topics.update(
+                    EventGraph.to_set(
+                        EventGraph.filter_p(event_graph, lambda evt: evt.progeny in newly_stale_readers),
+                        lambda evt: evt.topic,
+                    )
+                )
+                old_events[i] = (
+                    start_offset,
+                    EventGraph.filter_p(event_graph, lambda evt: evt.progeny not in newly_stale_readers),
+                )
             old_events = [x for x in old_events if type(x[1]) != EventGraph.Empty]
 
             # TODO: recursively find stale reads resulting from these deleted events
@@ -290,9 +326,10 @@ def simulate(register_engine, model_class, plan, stop_time=None, old_events=None
             #         evt.value).intersection(invalidated_topics))
             #     newly_stale_readers.update(EventGraph.to_set(filtered, lambda evt: evt.progeny))
 
-                # TODO What about events emitted by children?
+            # TODO What about events emitted by children?
 
             temp_engine: Optional[SimulationEngine] = None
+
             def local_register_engine(engine):
                 nonlocal temp_engine
                 temp_engine = engine
@@ -304,20 +341,22 @@ def simulate(register_engine, model_class, plan, stop_time=None, old_events=None
                     directives_to_simulate.append(old_task_directives[reader_task])
                 else:
                     pass  # The parents for these should already be included in newly_stale_readers
-            _, _, _ = simulate(local_register_engine, model_class, Plan(directives_to_simulate), stop_time=engine.elapsed_time)
+            _, _, _ = simulate(
+                local_register_engine, model_class, Plan(directives_to_simulate), stop_time=engine.elapsed_time
+            )
             register_engine(engine)  # restore the main engine
-            engine.task_children_called.update(temp_engine.task_children_called)   # = {}
+            engine.task_children_called.update(temp_engine.task_children_called)  # = {}
             engine.task_children_spawned.update(temp_engine.task_children_spawned)  # = {}
             while not temp_engine.schedule.is_empty():
                 start_offset = temp_engine.schedule.peek_next_time()
                 for task in temp_engine.schedule.get_next_batch():
                     engine.schedule.schedule(start_offset, task)
-            engine.task_start_times.update(temp_engine.task_start_times)   # = {}
-            engine.task_directives.update(temp_engine.task_directives)   # = {}
-            engine.task_inputs.update(temp_engine.task_inputs)   # = {}
+            engine.task_start_times.update(temp_engine.task_start_times)  # = {}
+            engine.task_directives.update(temp_engine.task_directives)  # = {}
+            engine.task_inputs.update(temp_engine.task_inputs)  # = {}
             engine.awaiting_conditions.extend(temp_engine.awaiting_conditions)  # = []
-            engine.awaiting_tasks.update(temp_engine.awaiting_tasks)   # = {}  # map from blocking task to blocked task
-            engine.spans.extend(temp_engine.spans)   # = []
+            engine.awaiting_tasks.update(temp_engine.awaiting_tasks)  # = {}  # map from blocking task to blocked task
+            engine.spans.extend(temp_engine.spans)  # = []
 
         old_awaiting_conditions = list(engine.awaiting_conditions)
         engine.awaiting_conditions.clear()
@@ -350,9 +389,13 @@ def simulate(register_engine, model_class, plan, stop_time=None, old_events=None
         "task_directives": engine.task_directives,
         "task_children_called": engine.task_children_called,
         "task_children_spawned": engine.task_children_spawned,
-        "task_parent_called": {child: parent for parent, children in engine.task_children_called.items() for child in children},
-        "task_parent_spawned": {child: parent for parent, children in engine.task_children_spawned.items() for child in children},
-        "deleted_tasks": deleted_tasks
+        "task_parent_called": {
+            child: parent for parent, children in engine.task_children_called.items() for child in children
+        },
+        "task_parent_spawned": {
+            child: parent for parent, children in engine.task_children_spawned.items() for child in children
+        },
+        "deleted_tasks": deleted_tasks,
     }
     filtered_spans = remove_task_from_spans(spans)
     return filtered_spans, without_special_events(engine.events), payload
@@ -371,7 +414,11 @@ def remove_task_from_spans(spans):
 def without_special_events(events):
     non_read_events = []
     for x, y in events:
-        filtered = EventGraph.filter_p(y, lambda evt: evt.topic not in (SPECIAL_READ_TOPIC, SPECIAL_SPAWN_TOPIC) and not (type(evt.topic) == tuple and evt.topic[0] == "FINISH"))
+        filtered = EventGraph.filter_p(
+            y,
+            lambda evt: evt.topic not in (SPECIAL_READ_TOPIC, SPECIAL_SPAWN_TOPIC)
+            and not (type(evt.topic) == tuple and evt.topic[0] == "FINISH"),
+        )
         if type(filtered) != EventGraph.Empty:
             non_read_events.append((x, filtered))
     return non_read_events
@@ -402,7 +449,9 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
 
         deleted_events = []
         for start_offset, event_graph in payload["events"]:
-            deleted = EventGraph.filter_p(event_graph, lambda evt: evt.progeny in deleted_tasks or evt.progeny in stale_tasks)
+            deleted = EventGraph.filter_p(
+                event_graph, lambda evt: evt.progeny in deleted_tasks or evt.progeny in stale_tasks
+            )
             if type(deleted) != EventGraph.Empty:
                 deleted_events.append((start_offset, deleted))
 
@@ -411,11 +460,18 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
         # TODO re-simulate stale reads
         reads_and_deleted_events = EventGraph.empty()
         for start_offset, event_graph in payload["events"]:
-            filtered = EventGraph.filter_p(event_graph, lambda evt: evt.topic == SPECIAL_READ_TOPIC or evt.progeny in deleted_tasks or evt.progeny in stale_tasks)
+            filtered = EventGraph.filter_p(
+                event_graph,
+                lambda evt: evt.topic == SPECIAL_READ_TOPIC
+                or evt.progeny in deleted_tasks
+                or evt.progeny in stale_tasks,
+            )
             reads_and_deleted_events = EventGraph.sequentially(reads_and_deleted_events, filtered)
 
         stale_reads = get_stale_reads(reads_and_deleted_events)
-        new_stale_tasks = {x.progeny for x in stale_reads if x.progeny not in deleted_tasks and x.progeny not in stale_tasks}
+        new_stale_tasks = {
+            x.progeny for x in stale_reads if x.progeny not in deleted_tasks and x.progeny not in stale_tasks
+        }
 
         worklist = list(new_stale_tasks)
         while worklist:
@@ -444,14 +500,24 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
 
     old_events_without_deleted_tasks = []
     for start_offset, event_graph in payload["events"]:
-        filtered = EventGraph.filter_p(event_graph, lambda evt: evt.progeny not in deleted_tasks and evt.progeny not in stale_tasks)
+        filtered = EventGraph.filter_p(
+            event_graph, lambda evt: evt.progeny not in deleted_tasks and evt.progeny not in stale_tasks
+        )
         if type(filtered) != EventGraph.Empty:
             old_events_without_deleted_tasks.append((start_offset, filtered))
 
     new_spans, new_events, new_payload = simulate(
         register_engine,
         model_class,
-        Plan(directives_to_simulate), old_events=old_events_without_deleted_tasks, deleted_tasks=set(deleted_tasks), old_task_directives=payload["task_directives"], old_task_parent_called=payload["task_parent_called"], old_task_parent_spawned=payload["task_parent_spawned"], old_task_children_called=payload["task_children_called"], old_task_children_spawned=payload["task_children_spawned"])
+        Plan(directives_to_simulate),
+        old_events=old_events_without_deleted_tasks,
+        deleted_tasks=set(deleted_tasks),
+        old_task_directives=payload["task_directives"],
+        old_task_parent_called=payload["task_parent_called"],
+        old_task_parent_spawned=payload["task_parent_spawned"],
+        old_task_children_called=payload["task_children_called"],
+        old_task_children_spawned=payload["task_children_spawned"],
+    )
 
     old_spans = list(payload["spans"])
 
@@ -470,9 +536,11 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
         None,
     )
 
+
 def get_stale_reads(event_graph):
     stale_reads, stale_topics = get_stale_reads_helper(event_graph, set())
     return stale_reads
+
 
 def get_stale_reads_helper(event_graph, stale_topics):
     if type(event_graph) == EventGraph.Empty:
@@ -486,7 +554,9 @@ def get_stale_reads_helper(event_graph, stale_topics):
             return [], stale_topics
     if type(event_graph) == EventGraph.Sequentially:
         prefix_stale_reads, prefix_stale_topics = get_stale_reads_helper(event_graph.prefix, stale_topics)
-        suffix_stale_reads, suffix_stale_topics = get_stale_reads_helper(event_graph.suffix, stale_topics.union(prefix_stale_topics))
+        suffix_stale_reads, suffix_stale_topics = get_stale_reads_helper(
+            event_graph.suffix, stale_topics.union(prefix_stale_topics)
+        )
         return prefix_stale_reads + suffix_stale_reads, prefix_stale_topics.union(suffix_stale_topics)
     if type(event_graph) == EventGraph.Concurrently:
         left_stale_reads, left_stale_topics = get_stale_reads_helper(event_graph.left, stale_topics)
