@@ -48,6 +48,8 @@ def callee_activity(model: "Model", value):
 def emit_event(model, topic, value, _):
     import sim as facade
     facade.sim_engine.current_task_frame.emit(topic, value)
+    if False:
+        yield
 
 
 def read_topic(model, topic, _):
@@ -106,10 +108,16 @@ def emit_if_x_equal(model, x_value, topic, value_to_emit, _):
     import sim as facade
     if model.x.get() == x_value:
         facade.sim_engine.current_task_frame.emit(topic, value_to_emit)
+    if False:
+        yield
 
 def conditional_decomposition(model, _):
     if model.x.get() == 1:
         spawn("reading_child", {})
+    else:
+        spawn("emit_event", {"topic": "u", "value": 2, "_": "_"})
+    if False:
+        yield
 
 def parent_of_conditional_decomposition(model, _):
     import sim as facade

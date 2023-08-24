@@ -244,6 +244,9 @@ def simulate(
         if type(reads) != EventGraph.Empty:
             engine.schedule.schedule(start_offset, reads)
 
+    # TODO: rather than start these off as empty, seed them from the caller... somehow?
+    # The hope being to avoid the convoluted logic in simulated_incremental
+    # And set up the possibility for marking reads as "not stale" if their computed values are the same
     restarted_tasks = set()
     stale_topics = set()
 
@@ -492,10 +495,11 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
 
     new_stale_tasks = set()
 
+    deleted_events = []
     while first or new_stale_tasks:
         first = False
 
-        deleted_events = []
+
         for start_offset, event_graph in payload["events"]:
             deleted = EventGraph.filter_p(
                 event_graph, lambda evt: evt.progeny in deleted_tasks or evt.progeny in stale_tasks
@@ -531,17 +535,29 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
                 new_stale_tasks.update(payload["task_children_called"][task])
                 worklist.extend(payload["task_children_called"][task])
 
-        worklist = list(new_stale_tasks)
-        new_stale_tasks = set()
-        for task in worklist:
-            if task in payload["task_parent_spawned"] or task in payload["task_parent_called"]:
-                deleted_tasks.append(task)
-            else:
-                new_stale_tasks.add(task)
+        # worklist = list(new_stale_tasks)
+        # new_stale_tasks = set()
+        # for task in worklist:
+        #     if task in payload["task_parent_spawned"] or task in payload["task_parent_called"]:
+        #         deleted_tasks.append(task)
+        #     else:
+        #         new_stale_tasks.add(task)
 
         stale_tasks.update(new_stale_tasks)
 
     task_to_directive = {task: directive for directive, task in payload["plan_directive_to_task"].items()}
+
+    stale_tasks_bk = set(stale_tasks)
+    worklist = list(stale_tasks)
+    stale_tasks = set()
+    while worklist:
+        task = worklist.pop()
+        parent_task = payload["task_parent_spawned"].get(task, payload["task_parent_called"].get(task, None))
+        if parent_task is None or parent_task not in stale_tasks_bk:
+            stale_tasks.add(task)
+        else:
+            deleted_tasks.append(task)
+
     stale_directives = [restore_directive(task_to_directive[task]) for task in stale_tasks]
 
     directives_to_simulate = added_directives + stale_directives
