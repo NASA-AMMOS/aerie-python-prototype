@@ -120,7 +120,7 @@ class SimulationEngine:
         else:
             return task_status, EventGraph.sequentially(
                 task_frame.collect(),
-                EventGraph.Atom(Event(SPECIAL_READ_TOPIC, [make_finish_topic(task)], resuming_caller_task)),
+                EventGraph.Atom(Event(SPECIAL_READ_TOPIC, (make_finish_topic(task),), resuming_caller_task)),
             )
 
 
@@ -145,7 +145,7 @@ class TaskFrame:
         """
         Returns the visible event history, filtered to the given topic
         """
-        topics = [topic_or_topics] if type(topic_or_topics) != list else topic_or_topics
+        topics = (topic_or_topics,) if type(topic_or_topics) != list else tuple(topic_or_topics)
         # Track reads as Events
         self.tip = EventGraph.sequentially(self.tip, EventGraph.Atom(Event(SPECIAL_READ_TOPIC, topics, self.task)))
         res = []
@@ -189,7 +189,7 @@ class JobSchedule:
         if not start_offset in self._schedule:
             self._schedule[start_offset] = []
         for _, batch in self._schedule.items():
-            if task in batch:
+            if task in batch and not EventGraph.is_event_graph(task):
                 raise Exception("Double scheduling task: " + str(task))
         self._schedule[start_offset].append(task)
 
@@ -239,6 +239,14 @@ def simulate(
     for directive in plan.directives:
         engine.defer(directive.type, directive.start_time, directive.args)
 
+    for start_offset, event_graph in old_events:
+        reads = EventGraph.filter(event_graph, [SPECIAL_READ_TOPIC])
+        if type(reads) != EventGraph.Empty:
+            engine.schedule.schedule(start_offset, reads)
+
+    restarted_tasks = set()
+    stale_topics = set()
+
     while not engine.schedule.is_empty():
         resume_time = engine.schedule.peek_next_time()
         if stop_time is not None and resume_time >= stop_time:
@@ -248,15 +256,41 @@ def simulate(
         while old_events and old_events[0][0] < resume_time:
             engine.events.append(old_events.pop(0))
 
-        batch_event_graph = EventGraph.empty()
+        batch = engine.schedule.get_next_batch()
+        batch_reads = [x for x in batch if EventGraph.is_event_graph(x)]
+        batch_tasks = [x for x in batch if not EventGraph.is_event_graph(x)]
 
-        for task in engine.schedule.get_next_batch():
+        # TODO do something with batch_reads
+        tasks_to_restart = set()
+        for read_graph in batch_reads:
+            for read in EventGraph.to_set(read_graph):
+                if read.progeny in restarted_tasks:
+                    continue
+                # TODO check if it's stale
+                if set(read.value).intersection(stale_topics):
+                    tasks_to_restart.add(read.progeny)
+
+        if tasks_to_restart:
+            restart_stale_tasks(register_engine, model_class, engine, tasks_to_restart, old_task_directives, old_task_parent_called)
+            restarted_tasks.update(tasks_to_restart)
+
+            for i in range(len(old_events)):
+                start_offset, event_graph = old_events[i]
+                old_events[i] = (
+                    start_offset,
+                    EventGraph.filter_p(event_graph, lambda evt: evt.progeny not in restarted_tasks),
+                )
+            old_events = [x for x in old_events if type(x[1]) != EventGraph.Empty]
+
+        batch_event_graph = EventGraph.empty()
+        for task in batch_tasks:
             task_status, event_graph = engine.step(
                 task, TaskFrame(engine.elapsed_time, task=task, history=engine.events)
             )
             batch_event_graph = EventGraph.concurrently(batch_event_graph, event_graph)
 
         newly_invalidated_topics = EventGraph.to_set(batch_event_graph, lambda evt: evt.topic)
+        stale_topics.update(newly_invalidated_topics)
 
         if old_events and old_events[0][0] == resume_time:
             batch_event_graph = EventGraph.concurrently(batch_event_graph, old_events.pop(0)[1])
@@ -328,35 +362,7 @@ def simulate(
 
             # TODO What about events emitted by children?
 
-            temp_engine: Optional[SimulationEngine] = None
-
-            def local_register_engine(engine):
-                nonlocal temp_engine
-                temp_engine = engine
-                register_engine(engine)
-
-            directives_to_simulate = []
-            for reader_task in newly_stale_readers:
-                if reader_task not in old_task_parent_called:
-                    directives_to_simulate.append(old_task_directives[reader_task])
-                else:
-                    pass  # The parents for these should already be included in newly_stale_readers
-            _, _, _ = simulate(
-                local_register_engine, model_class, Plan(directives_to_simulate), stop_time=engine.elapsed_time
-            )
-            register_engine(engine)  # restore the main engine
-            engine.task_children_called.update(temp_engine.task_children_called)  # = {}
-            engine.task_children_spawned.update(temp_engine.task_children_spawned)  # = {}
-            while not temp_engine.schedule.is_empty():
-                start_offset = temp_engine.schedule.peek_next_time()
-                for task in temp_engine.schedule.get_next_batch():
-                    engine.schedule.schedule(start_offset, task)
-            engine.task_start_times.update(temp_engine.task_start_times)  # = {}
-            engine.task_directives.update(temp_engine.task_directives)  # = {}
-            engine.task_inputs.update(temp_engine.task_inputs)  # = {}
-            engine.awaiting_conditions.extend(temp_engine.awaiting_conditions)  # = []
-            engine.awaiting_tasks.update(temp_engine.awaiting_tasks)  # = {}  # map from blocking task to blocked task
-            engine.spans.extend(temp_engine.spans)  # = []
+            # restart_stale_tasks(register_engine, model_class, engine, newly_stale_readers, old_task_directives, old_task_parent_called)
 
         old_awaiting_conditions = list(engine.awaiting_conditions)
         engine.awaiting_conditions.clear()
@@ -399,6 +405,48 @@ def simulate(
     }
     filtered_spans = remove_task_from_spans(spans)
     return filtered_spans, without_special_events(engine.events), payload
+
+
+def restart_stale_tasks(register_engine, model_class, engine, tasks_to_restart, old_task_directives,
+                        old_task_parent_called):
+    temp_engine: Optional[SimulationEngine] = None
+
+    def local_register_engine(engine):
+        nonlocal temp_engine
+        temp_engine = engine
+        register_engine(engine)
+
+    worklist = list(tasks_to_restart)
+    tasks_to_restart = set()
+    while worklist:
+        task = worklist.pop()
+        if task in old_task_parent_called:
+            worklist.append(old_task_parent_called[task])
+        else:
+            tasks_to_restart.add(task)
+
+    directives_to_simulate = []
+    for reader_task in tasks_to_restart:
+        if reader_task not in old_task_parent_called:
+            directives_to_simulate.append(old_task_directives[reader_task])
+        else:
+            pass  # The parents for these should already be included in tasks_to_restart
+    _, _, _ = simulate(
+        local_register_engine, model_class, Plan(directives_to_simulate), stop_time=engine.elapsed_time
+    )
+    register_engine(engine)  # restore the main engine
+    engine.task_children_called.update(temp_engine.task_children_called)  # = {}
+    engine.task_children_spawned.update(temp_engine.task_children_spawned)  # = {}
+    while not temp_engine.schedule.is_empty():
+        start_offset = temp_engine.schedule.peek_next_time()
+        for task in temp_engine.schedule.get_next_batch():
+            engine.schedule.schedule(start_offset, task)
+    engine.task_start_times.update(temp_engine.task_start_times)  # = {}
+    engine.task_directives.update(temp_engine.task_directives)  # = {}
+    engine.task_inputs.update(temp_engine.task_inputs)  # = {}
+    engine.awaiting_conditions.extend(temp_engine.awaiting_conditions)  # = []
+    engine.awaiting_tasks.update(temp_engine.awaiting_tasks)  # = {}  # map from blocking task to blocked task
+    engine.spans.extend(temp_engine.spans)  # = []
 
 
 def remove_task_from_spans(spans):

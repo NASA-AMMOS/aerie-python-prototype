@@ -132,3 +132,15 @@ class EventGraph:
         if type(event_graph) == EventGraph.Concurrently:
             return EventGraph.to_set(event_graph.left, f).union(EventGraph.to_set(event_graph.right, f))
         raise ValueError("Not an event_graph: " + str(event_graph))
+
+    @classmethod
+    def is_event_graph(cls, event_graph):
+        if type(event_graph) == EventGraph.Empty:
+            return True
+        if type(event_graph) == EventGraph.Atom:
+            return True
+        if type(event_graph) == EventGraph.Sequentially:
+            return EventGraph.is_event_graph(event_graph.prefix) and EventGraph.is_event_graph(event_graph.suffix)
+        if type(event_graph) == EventGraph.Concurrently:
+            return EventGraph.is_event_graph(event_graph.left) and EventGraph.is_event_graph(event_graph.right)
+        return False
