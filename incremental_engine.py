@@ -218,6 +218,7 @@ def simulate(
     old_task_parent_called=None,
     old_task_children_spawned=None,
     old_task_children_called=None,
+    tasks_to_restart=None
 ):
     if old_events is None:
         old_events = []
@@ -233,10 +234,17 @@ def simulate(
         old_task_children_spawned = {}
     if old_task_children_called is None:
         old_task_children_called = {}
+    if tasks_to_restart is None:
+        tasks_to_restart = set()
     engine = SimulationEngine()
     engine.register_model(model_class)
     register_engine(engine)
     for directive in plan.directives:
+        engine.defer(directive.type, directive.start_time, directive.args)
+
+    for task in tasks_to_restart:
+        directive = old_task_directives[task]
+        deleted_tasks.add(task)
         engine.defer(directive.type, directive.start_time, directive.args)
 
     for start_offset, event_graph in old_events:
@@ -524,9 +532,9 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
         else:
             deleted_tasks.append(task)
 
-    stale_directives = [restore_directive(task_to_directive[task]) for task in stale_tasks]
+    # stale_directives = [restore_directive(task_to_directive[task]) for task in stale_tasks]
 
-    directives_to_simulate = added_directives + stale_directives
+    directives_to_simulate = added_directives  # + stale_directives
 
     old_events_without_deleted_tasks = []
     for start_offset, event_graph in payload["events"]:
@@ -547,6 +555,7 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
         old_task_parent_spawned=payload["task_parent_spawned"],
         old_task_children_called=payload["task_children_called"],
         old_task_children_spawned=payload["task_children_spawned"],
+        tasks_to_restart=stale_tasks
     )
 
     old_spans = list(payload["spans"])
@@ -559,7 +568,7 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
     for deleted_directive in deleted_directives:
         old_spans = [x for x in old_spans if x[0] != deleted_directive]
     old_spans = [x for x in old_spans if x[0][2] not in deleted_tasks]
-    old_spans = [x for x in old_spans if x[0] not in stale_directives]
+    # old_spans = [x for x in old_spans if x[0] not in stale_directives]
     return (
         sorted(remove_task_from_spans(old_spans) + new_spans, key=lambda x: (x[1], x[2])),
         without_special_events(collapse_simultaneous(new_events, EventGraph.sequentially)),
