@@ -91,7 +91,7 @@ def parent_of_reading_child(model):
 def reading_child(model):
     import sim as facade
     res = []
-    for start_offset, events in facade.sim_engine.current_task_frame.read("x"):
+    for start_offset, events in facade.sim_engine.current_task_frame.read("y"):
         res.append((start_offset, EventGraph.to_string(events)))
     facade.sim_engine.current_task_frame.emit("history", res)
     yield Delay(model.x.get())

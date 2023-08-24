@@ -245,6 +245,13 @@ def simulate(
     for task in tasks_to_restart:
         directive = old_task_directives[task]
         deleted_tasks.add(task)
+
+        # TODO splice the task into its spawn point
+        if task in old_task_parent_spawned:
+            pass
+        if task in old_task_parent_called:
+            pass
+
         engine.defer(directive.type, directive.start_time, directive.args)
 
     for start_offset, event_graph in old_events:
@@ -294,6 +301,9 @@ def simulate(
                     EventGraph.filter_p(event_graph, lambda evt: evt.progeny not in restarted_tasks),
                 )
             old_events = [x for x in old_events if not EventGraph.is_empty(x[1])]
+            for task in batch_tasks:
+                engine.schedule.schedule(engine.elapsed_time, task)
+            continue  # In order to process all tasks at this time in parallel, we re-schedule the batch tasks and start the loop over
 
         batch_event_graph = EventGraph.empty()
         for task in batch_tasks:
