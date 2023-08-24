@@ -133,8 +133,8 @@ class EventGraph:
             return EventGraph.to_set(event_graph.left, f).union(EventGraph.to_set(event_graph.right, f))
         raise ValueError("Not an event_graph: " + str(event_graph))
 
-    @classmethod
-    def is_event_graph(cls, event_graph):
+    @staticmethod
+    def is_event_graph(event_graph):
         if type(event_graph) == EventGraph.Empty:
             return True
         if type(event_graph) == EventGraph.Atom:
@@ -144,3 +144,15 @@ class EventGraph:
         if type(event_graph) == EventGraph.Concurrently:
             return EventGraph.is_event_graph(event_graph.left) and EventGraph.is_event_graph(event_graph.right)
         return False
+
+    @staticmethod
+    def is_empty(event_graph):
+        if type(event_graph) == EventGraph.Empty:
+            return True
+        if type(event_graph) == EventGraph.Atom:
+            return False
+        if type(event_graph) == EventGraph.Sequentially:
+            return False
+        if type(event_graph) == EventGraph.Concurrently:
+            return False
+        raise ValueError("Not an event_graph: " + str(event_graph))
