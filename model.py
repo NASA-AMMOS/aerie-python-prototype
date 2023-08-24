@@ -107,6 +107,10 @@ def emit_if_x_equal(model, x_value, topic, value_to_emit, _):
     if model.x.get() == x_value:
         facade.sim_engine.current_task_frame.emit(topic, value_to_emit)
 
+def conditional_decomposition(model, _):
+    if model.x.get() == 1:
+        spawn("reading_child", {})
+
 
 class Model:
     def __init__(self):
@@ -132,6 +136,7 @@ class Model:
             parent_of_reading_child,
             reading_child,
             spawns_reading_child,
-            emit_if_x_equal
+            emit_if_x_equal,
+            conditional_decomposition
         ]
         return {x.__name__: x for x in activity_types}

@@ -273,6 +273,24 @@ def test_incremental_deleted_read():
     )
 
 
+def test_incremental_conditional_decomposition():
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("emit_event", 2, {"topic": "x", "value": 1, "_": 1}),
+                Directive("conditional_decomposition", 3, {"_": 2}),
+            ]
+        ),
+        Plan(
+            [
+                Directive("emit_event", 2, {"topic": "x", "value": 2, "_": 1}),
+                Directive("conditional_decomposition", 3, {"_": 2}),
+            ]
+        ),
+        {}
+    )
+
+
 def test_incremental_spawned_activity():
     """
     Parent -> child
