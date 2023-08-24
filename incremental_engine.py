@@ -195,7 +195,7 @@ class JobSchedule:
         return len(self._schedule) == 0
 
 
-def simulate(register_engine, model_class, plan, stop_time=None, old_events=None, deleted_tasks=None, old_task_directives=None, old_task_parent_spawned=None, old_task_parent_called=None):
+def simulate(register_engine, model_class, plan, stop_time=None, old_events=None, deleted_tasks=None, old_task_directives=None, old_task_parent_spawned=None, old_task_parent_called=None, old_task_children_spawned=None, old_task_children_called=None):
     if old_events is None:
         old_events = []
     if deleted_tasks is None:
@@ -206,6 +206,10 @@ def simulate(register_engine, model_class, plan, stop_time=None, old_events=None
         old_task_parent_spawned = {}
     if old_task_parent_called is None:
         old_task_parent_called = {}
+    if old_task_children_spawned is None:
+        old_task_children_spawned = {}
+    if old_task_children_called is None:
+        old_task_children_called = {}
     engine = SimulationEngine()
     engine.register_model(model_class)
     register_engine(engine)
@@ -262,6 +266,12 @@ def simulate(register_engine, model_class, plan, stop_time=None, old_events=None
                     # Can we do better??? Can we use the spans?
                     newly_stale_readers.add(old_task_parent_called[reader])
                     worklist.append(old_task_parent_called[reader])
+                # if reader in old_task_children_spawned:
+                #     newly_stale_readers.update(old_task_children_spawned[reader])
+                #     worklist.extend(old_task_children_spawned[reader])
+                # if reader in old_task_children_called:
+                #     newly_stale_readers.update(old_task_children_called[reader])
+                #     worklist.extend(old_task_children_called[reader])
 
             deleted_tasks.update(newly_stale_readers)
             # Filter out all events from these tasks in the future
@@ -406,6 +416,25 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
 
         stale_reads = get_stale_reads(reads_and_deleted_events)
         new_stale_tasks = {x.progeny for x in stale_reads if x.progeny not in deleted_tasks and x.progeny not in stale_tasks}
+
+        worklist = list(new_stale_tasks)
+        while worklist:
+            task = worklist.pop()
+            if task in payload["task_children_spawned"]:
+                new_stale_tasks.update(payload["task_children_spawned"][task])
+                worklist.extend(payload["task_children_spawned"][task])
+            if task in payload["task_children_called"]:
+                new_stale_tasks.update(payload["task_children_called"][task])
+                worklist.extend(payload["task_children_called"][task])
+
+        worklist = list(new_stale_tasks)
+        new_stale_tasks = set()
+        for task in worklist:
+            if task in payload["task_parent_spawned"] or task in payload["task_parent_called"]:
+                deleted_tasks.append(task)
+            else:
+                new_stale_tasks.add(task)
+
         stale_tasks.update(new_stale_tasks)
 
     task_to_directive = {task: directive for directive, task in payload["plan_directive_to_task"].items()}
@@ -422,7 +451,7 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
     new_spans, new_events, new_payload = simulate(
         register_engine,
         model_class,
-        Plan(directives_to_simulate), old_events=old_events_without_deleted_tasks, deleted_tasks=set(deleted_tasks), old_task_directives=payload["task_directives"], old_task_parent_called=payload["task_parent_called"], old_task_parent_spawned=payload["task_parent_spawned"])
+        Plan(directives_to_simulate), old_events=old_events_without_deleted_tasks, deleted_tasks=set(deleted_tasks), old_task_directives=payload["task_directives"], old_task_parent_called=payload["task_parent_called"], old_task_parent_spawned=payload["task_parent_spawned"], old_task_children_called=payload["task_children_called"], old_task_children_spawned=payload["task_children_spawned"])
 
     old_spans = list(payload["spans"])
 
