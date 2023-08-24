@@ -58,7 +58,7 @@ class SimulationEngine:
     def spawn_task(self, task, is_call=False):
         self.task_start_times[task] = self.elapsed_time
         parent_task_frame = self.current_task_frame
-        task_frame = TaskFrame(self.elapsed_time, task=task, history=self.events)
+        task_frame = TaskFrame(self.elapsed_time, task=task, history=parent_task_frame._get_visible_history())
         task_frame.emit(SPECIAL_SPAWN_TOPIC, task)
         task_status, events = self.step(task, task_frame)
         if parent_task_frame.task is not None:
