@@ -1,3 +1,6 @@
+import threading
+import time
+
 import engine as sim
 import incremental_engine as incremental_sim
 import model
@@ -201,7 +204,7 @@ def test_with_reads_made_stale_dynamically():
                 Directive("read_topic", 15, {"topic": "x", "_": 1}),
             ]
         ),
-        {}
+        {},
     )
 
 
@@ -287,8 +290,9 @@ def test_conditional_decomposition():
                 Directive("conditional_decomposition", 3, {"_": 2}),
             ]
         ),
-        {}
+        {},
     )
+
 
 def test_conditional_decomposition_2():
     incremental_sim_test_case(
@@ -304,8 +308,9 @@ def test_conditional_decomposition_2():
                 Directive("parent_of_conditional_decomposition", 3, {"_": 2}),
             ]
         ),
-        {}
+        {},
     )
+
 
 def test_conditional_decomposition_3():
     incremental_sim_test_case(
@@ -321,7 +326,7 @@ def test_conditional_decomposition_3():
                 Directive("parent_of_parent_of_conditional_decomposition", 3, {"_": 2}),
             ]
         ),
-        {}
+        {},
     )
 
 
@@ -340,7 +345,7 @@ def test_read_becomes_unstale():
                 Directive("emit_if_x_equal", 5, {"x_value": 1, "topic": "z", "value_to_emit": 1, "_": 3}),
             ]
         ),
-        {"emit_if_x_equal": error_on_rerun("emit_if_x_equal")}
+        {"emit_if_x_equal": error_on_rerun("emit_if_x_equal")},
     )
 
 
@@ -367,8 +372,10 @@ def test_spawned_activity():
                 Directive("spawns_reading_child", 10, {}),
             ]
         ),
-        {"emit_event": error_on_rerun("emit_event", lambda kwargs: kwargs["_"] == 10),
-         "spawns_reading_child": error_on_rerun("spawns_reading_child")},
+        {
+            "emit_event": error_on_rerun("emit_event", lambda kwargs: kwargs["_"] == 10),
+            "spawns_reading_child": error_on_rerun("spawns_reading_child"),
+        },
     )
 
 
@@ -377,21 +384,85 @@ def test_restart_task_with_earler_non_stale_read():
         Plan(
             [
                 Directive("emit_event", 7, {"topic": "x", "value": -1, "_": 3}),
-                Directive("parent_of_read_emit_three_times_and_whoopee", 8, {"read_topic": "x", "emit_topic": "history", "delay": 5, "_": 1}),
+                Directive(
+                    "parent_of_read_emit_three_times_and_whoopee",
+                    8,
+                    {"read_topic": "x", "emit_topic": "history", "delay": 5, "_": 1},
+                ),
             ]
         ),
         Plan(
             [
                 Directive("emit_event", 7, {"topic": "x", "value": -1, "_": 3}),
-                Directive("parent_of_read_emit_three_times_and_whoopee", 8, {"read_topic": "x", "emit_topic": "history", "delay": 5, "_": 1}),
+                Directive(
+                    "parent_of_read_emit_three_times_and_whoopee",
+                    8,
+                    {"read_topic": "x", "emit_topic": "history", "delay": 5, "_": 1},
+                ),
                 Directive("emit_event", 9, {"topic": "x", "value": 11, "_": 2}),
             ]
         ),
-        {}
+        {},
     )
 
 
 # TODO: I suspect some edge cases with Delay(0) - e.g. spawn(); Delay(0); emit(). The emit should come causally after the first step of the spawn.
+def test_baseline_delay_zero_between_spawns():
+    def register_engine(engine):
+        facade.sim_engine = engine
+
+    spans, sim_events, _ = sim.simulate(
+        register_engine,
+        model.Model,
+        Plan(
+            [
+                Directive("emit_event", 2, {"topic": "x", "value": 1, "_": 1}),
+                Directive("delay_zero_between_spawns", 3, {"_": 2}),
+            ]
+        ),
+    )
+
+    assert [(x, sim.EventGraph.to_string(y)) for x, y in sim_events] == [
+        (2, "x=1"),
+        (3, "history=[(2, 'x=1')];history=[];history=[(2, 'x=1')];history=[]"),
+    ]
+
+
+def test_baseline_delay_zero_between_spawns_2():
+    def register_engine(engine):
+        facade.sim_engine = engine
+
+    spans, sim_events, _ = sim.simulate(
+        register_engine,
+        model.Model,
+        Plan(
+            [
+                Directive("emit_event", 2, {"topic": "x", "value": 2, "_": 1}),
+                Directive("delay_zero_between_spawns", 3, {"_": 2}),
+            ]
+        ),
+    )
+
+    assert [(x, sim.EventGraph.to_string(y)) for x, y in sim_events] == [(2, "x=2"), (3, "u=2;u=2")]
+
+
+# TODO: I suspect some edge cases with Delay(0) - e.g. spawn(); Delay(0); emit(). The emit should come causally after the first step of the spawn.
+def test_delay_zero_between_spawns():
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("emit_event", 2, {"topic": "x", "value": 1, "_": 1}),
+                Directive("delay_zero_between_spawns", 3, {"_": 2}),
+            ]
+        ),
+        Plan(
+            [
+                Directive("emit_event", 2, {"topic": "x", "value": 2, "_": 1}),
+                Directive("delay_zero_between_spawns", 3, {"_": 2}),
+            ]
+        ),
+        {},
+    )
 
 
 def incremental_sim_test_case(old_plan, new_plan, overrides):
@@ -416,9 +487,13 @@ def incremental_sim_test_case(old_plan, new_plan, overrides):
         register_engine_with_error_activity, model.Model, new_plan, old_plan, payload
     )
 
-    assert [(x, sim.EventGraph.to_string(y)) for x, y in actual_sim_events] == [
-        (x, sim.EventGraph.to_string(y)) for x, y in expected_sim_events
-    ]
+    actual = [(x, sim.EventGraph.to_string(y)) for x, y in actual_sim_events]
+    expected = [(x, sim.EventGraph.to_string(y)) for x, y in expected_sim_events]
+    print()
+    print("Expected :", expected)
+    print("Actual   :", actual)
+
+    assert actual == expected
     assert set((hashable_directive(x), y, z) for x, y, z in actual_spans) == set((hashable_directive(x), y, z) for x, y, z in expected_spans)
 
 

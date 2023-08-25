@@ -163,6 +163,12 @@ def parent_of_parent_of_conditional_decomposition(model, _):
         yield
 
 
+def delay_zero_between_spawns(model, _):
+    spawn("conditional_decomposition", {"_": _})
+    yield Delay(0)
+    spawn("conditional_decomposition", {"_": _})
+
+
 class Model:
     def __init__(self):
         self.x = Register("x", 55)
@@ -192,6 +198,7 @@ class Model:
             parent_of_conditional_decomposition,
             parent_of_parent_of_conditional_decomposition,
             read_emit_three_times_and_whoopee,
-            parent_of_read_emit_three_times_and_whoopee
+            parent_of_read_emit_three_times_and_whoopee,
+            delay_zero_between_spawns
         ]
         return {x.__name__: x for x in activity_types}

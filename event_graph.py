@@ -33,30 +33,30 @@ class EventGraph:
         return EventGraph.Concurrently(left, right)
 
     @staticmethod
-    def to_string(event_graph, parent=None, str=False):
+    def to_string(event_graph, parent=None, use_str=False):
         if type(event_graph) == EventGraph.Empty:
             return ""
         if type(event_graph) == EventGraph.Atom:
-            if str:
+            if use_str:
                 return builtins.str(event_graph.value)
             else:
                 return f"{event_graph.value.topic}={event_graph.value.value}"
         if type(event_graph) == EventGraph.Sequentially:
-            res = f"{EventGraph.to_string(event_graph.prefix, parent=type(event_graph), str=str)};{EventGraph.to_string(event_graph.suffix, parent=type(event_graph), str=str)}"
+            res = f"{EventGraph.to_string(event_graph.prefix, parent=type(event_graph), use_str=use_str)};{EventGraph.to_string(event_graph.suffix, parent=type(event_graph), use_str=use_str)}"
             if parent == EventGraph.Concurrently:
                 return f"({res})"
             else:
                 return res
         if type(event_graph) == EventGraph.Concurrently:
-            left_str = EventGraph.to_string(event_graph.left, parent=type(event_graph), str=str)
-            right_str = EventGraph.to_string(event_graph.right, parent=type(event_graph), str=str)
+            left_str = EventGraph.to_string(event_graph.left, parent=type(event_graph), use_str=use_str)
+            right_str = EventGraph.to_string(event_graph.right, parent=type(event_graph), use_str=use_str)
             left_str, right_str = sorted([left_str, right_str])
             res = f"{left_str}|{right_str}"
             if parent == EventGraph.Sequentially:
                 return f"({res})"
             else:
                 return res
-        return str(event_graph)
+        return use_str(event_graph)
 
     @staticmethod
     def iter(event_graph):
