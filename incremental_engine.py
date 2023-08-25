@@ -56,10 +56,10 @@ class SimulationEngine:
         self.spawn_task(task)
 
     def spawn_task(self, task, is_call=False):
+        self.current_task_frame.emit(SPECIAL_SPAWN_TOPIC, task)
         self.task_start_times[task] = self.elapsed_time
         parent_task_frame = self.current_task_frame
         task_frame = TaskFrame(self.elapsed_time, task=task, history=parent_task_frame._get_visible_history())
-        task_frame.emit(SPECIAL_SPAWN_TOPIC, task)
         task_status, events = self.step(task, task_frame)
         if parent_task_frame.task is not None:
             if is_call:
@@ -294,9 +294,13 @@ def simulate(
                     tasks_to_restart.add(read.progeny)
 
         if tasks_to_restart:
-            restart_stale_tasks(
-                register_engine, model_class, engine, tasks_to_restart, old_task_directives, old_task_parent_called, list(engine.events)
+            to_graft = restart_stale_tasks(
+                register_engine, model_class, engine, tasks_to_restart, old_task_directives, old_task_parent_called, old_task_parent_spawned, list(engine.events), list(old_events)
             )
+
+            # for task, event_graph in to_graft.items():
+            #     old_events[0] = old_events[0][0], graft(old_events[0][1], event_graph, task, None)
+
             restarted_tasks.update(tasks_to_restart)
 
             for i in range(len(old_events)):
@@ -411,7 +415,7 @@ def simulate(
 
 
 def restart_stale_tasks(
-    register_engine, model_class, engine, tasks_to_restart, old_task_directives, old_task_parent_called, old_events
+    register_engine, model_class, engine, tasks_to_restart, old_task_directives, old_task_parent_called, old_task_parent_spawned, current_events, old_events
 ):
     temp_engine: Optional[SimulationEngine] = None
 
@@ -429,9 +433,25 @@ def restart_stale_tasks(
         else:
             tasks_to_restart.add(task)
 
+    to_graft = {}
+
     for reader_task in [x for x in tasks_to_restart if x not in old_task_parent_called]:
         engine.schedule.unschedule(reader_task)
-        _, _, _ = simulate(local_register_engine, model_class, Plan([old_task_directives[reader_task]]), stop_time=engine.elapsed_time, old_events=old_events)
+        # TODO: Figure out what should be in the past of this task
+        if reader_task in old_task_parent_spawned:
+            spawn_event_prefix = find_spawn_event(current_events + old_events, reader_task)
+        else:
+            spawn_event_prefix = list(current_events)
+        # Maybe slap it in old_events?
+        def _():
+            _, _, payload = simulate(local_register_engine, model_class, Plan([old_task_directives[reader_task]]), stop_time=engine.elapsed_time, old_events=spawn_event_prefix)
+            return payload
+        payload = _()
+        # payload["events"]
+        # [(x, y) for x, y in payload["events"] if x < engine.elapsed_time]  # these should match exactly
+        if reader_task in old_task_parent_spawned:
+            new_events = EventGraph.empty()  # [(x, y) for x, y in payload["events"] if x == engine.elapsed_time][0][1]
+            to_graft[reader_task] = new_events  # these need to be grafted on
         register_engine(engine)  # restore the main engine
         engine.task_children_called.update(temp_engine.task_children_called)  # = {}
         engine.task_children_spawned.update(temp_engine.task_children_spawned)  # = {}
@@ -445,6 +465,70 @@ def restart_stale_tasks(
         engine.awaiting_conditions.extend(temp_engine.awaiting_conditions)  # = []
         engine.awaiting_tasks.update(temp_engine.awaiting_tasks)  # = {}  # map from blocking task to blocked task
         engine.spans.extend(temp_engine.spans)  # = []
+    return to_graft
+
+
+def graft(event_graph, new_events, old_task, new_task):
+    if type(event_graph) == EventGraph.Empty:
+        return EventGraph.empty()
+    if type(event_graph) == EventGraph.Atom:
+        evt = event_graph.value
+        if evt.topic == SPECIAL_SPAWN_TOPIC and evt.value == old_task:
+            return EventGraph.Sequentially(EventGraph.atom(Event(SPECIAL_SPAWN_TOPIC, new_task, event_graph.value.progeny)), new_events)
+        else:
+            return event_graph
+    if type(event_graph) == EventGraph.Sequentially:
+        return EventGraph.sequentially(graft(event_graph.prefix, new_events, old_task, new_task), graft(event_graph.suffix, new_events, old_task, new_task))
+    if type(event_graph) == EventGraph.Concurrently:
+        return EventGraph.concurrently(graft(event_graph.left, new_events, old_task, new_task),
+                                       graft(event_graph.right, new_events, old_task, new_task))
+    raise ValueError("Not an event_graph: " + str(event_graph))
+
+
+def find_spawn_event(old_events, reader_task):
+    res = []
+    for x, eg in old_events:
+        prefix = get_prefix(eg, lambda evt: evt.topic == SPECIAL_SPAWN_TOPIC and evt.value == reader_task)
+        if prefix is None:
+            res.append((x, eg))
+        else:
+            res.append((x, prefix))
+            return res
+    raise ValueError("Could not find " + repr(reader_task) + " in " + repr(old_events))
+
+
+def get_prefix(event_graph, f):
+    """
+    Returns the prefix up to and not including f, if f is found
+    Otherwise, returns None.
+    """
+    if type(event_graph) == EventGraph.Empty:
+        return None
+    if type(event_graph) == EventGraph.Atom:
+        if f(event_graph.value):
+            return EventGraph.empty()
+        else:
+            return None
+    if type(event_graph) == EventGraph.Sequentially:
+        res_p = get_prefix(event_graph.prefix, f)
+        res_s = get_prefix(event_graph.suffix, f)
+        if res_p is None and res_s is None:
+            return None
+        if not res_p is None:
+            return res_p
+        return EventGraph.sequentially(event_graph.prefix, res_s)
+    if type(event_graph) == EventGraph.Concurrently:
+        res_l = get_prefix(event_graph.left, f)
+        res_r = get_prefix(event_graph.right, f)
+        if res_l is not None:
+            return res_l
+        elif res_r is not None:
+            return res_r
+        else:
+            return None
+
+    raise ValueError("Not an event_graph: " + str(event_graph))
+
 
 
 def remove_task_from_spans(spans):
