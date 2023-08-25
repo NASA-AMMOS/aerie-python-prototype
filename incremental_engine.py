@@ -295,7 +295,7 @@ def simulate(
 
         if tasks_to_restart:
             restart_stale_tasks(
-                register_engine, model_class, engine, tasks_to_restart, old_task_directives, old_task_parent_called
+                register_engine, model_class, engine, tasks_to_restart, old_task_directives, old_task_parent_called, list(engine.events)
             )
             restarted_tasks.update(tasks_to_restart)
 
@@ -411,7 +411,7 @@ def simulate(
 
 
 def restart_stale_tasks(
-    register_engine, model_class, engine, tasks_to_restart, old_task_directives, old_task_parent_called
+    register_engine, model_class, engine, tasks_to_restart, old_task_directives, old_task_parent_called, old_events
 ):
     temp_engine: Optional[SimulationEngine] = None
 
@@ -431,7 +431,7 @@ def restart_stale_tasks(
 
     for reader_task in [x for x in tasks_to_restart if x not in old_task_parent_called]:
         engine.schedule.unschedule(reader_task)
-        _, _, _ = simulate(local_register_engine, model_class, Plan([old_task_directives[reader_task]]), stop_time=engine.elapsed_time)
+        _, _, _ = simulate(local_register_engine, model_class, Plan([old_task_directives[reader_task]]), stop_time=engine.elapsed_time, old_events=old_events)
         register_engine(engine)  # restore the main engine
         engine.task_children_called.update(temp_engine.task_children_called)  # = {}
         engine.task_children_spawned.update(temp_engine.task_children_spawned)  # = {}
