@@ -81,6 +81,27 @@ def read_emit_three_times(model, read_topic, emit_topic, delay, _):
             yield Delay(delay)
 
 
+def read_emit_three_times_and_whoopee(model, read_topic, emit_topic, delay, _):
+    if model.x.get() == -1:
+        should_emit_whoopee = True
+    else:
+        should_emit_whoopee = False
+    import sim as facade
+    for x in range(4 if should_emit_whoopee else 3):
+        res = []
+        for start_offset, events in facade.sim_engine.current_task_frame.read(read_topic):
+            res.append((start_offset, EventGraph.to_string(events)))
+        facade.sim_engine.current_task_frame.emit(emit_topic, res)
+        if x < 2:
+            yield Delay(delay)
+    if should_emit_whoopee:
+        facade.sim_engine.current_task_frame.emit(emit_topic, "whoopee")
+
+
+def parent_of_read_emit_three_times_and_whoopee(model, **kwargs):
+    spawn("read_emit_three_times_and_whoopee", kwargs)
+
+
 def parent_of_reading_child(model):
     import sim as facade
     facade.sim_engine.current_task_frame.emit("y", 1)
@@ -161,6 +182,8 @@ class Model:
             emit_if_x_equal,
             conditional_decomposition,
             parent_of_conditional_decomposition,
-            parent_of_parent_of_conditional_decomposition
+            parent_of_parent_of_conditional_decomposition,
+            read_emit_three_times_and_whoopee,
+            parent_of_read_emit_three_times_and_whoopee
         ]
         return {x.__name__: x for x in activity_types}

@@ -372,6 +372,25 @@ def test_spawned_activity():
     )
 
 
+def test_restart_task_with_earler_non_stale_read():
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("emit_event", 7, {"topic": "x", "value": -1, "_": 3}),
+                Directive("parent_of_read_emit_three_times_and_whoopee", 8, {"read_topic": "x", "emit_topic": "history", "delay": 5, "_": 1}),
+            ]
+        ),
+        Plan(
+            [
+                Directive("emit_event", 7, {"topic": "x", "value": -1, "_": 3}),
+                Directive("parent_of_read_emit_three_times_and_whoopee", 8, {"read_topic": "x", "emit_topic": "history", "delay": 5, "_": 1}),
+                Directive("emit_event", 9, {"topic": "x", "value": 11, "_": 2}),
+            ]
+        ),
+        {}
+    )
+
+
 def incremental_sim_test_case(old_plan, new_plan, overrides):
     def register_engine(engine):
         facade.sim_engine = engine

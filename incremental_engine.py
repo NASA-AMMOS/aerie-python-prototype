@@ -193,6 +193,11 @@ class JobSchedule:
                 raise Exception("Double scheduling task: " + str(task))
         self._schedule[start_offset].append(task)
 
+    def unschedule(self, task):
+        for _, batch in self._schedule.items():
+            if task in batch and not EventGraph.is_event_graph(task):
+                batch.remove(task)
+
     def peek_next_time(self):
         return min(self._schedule)
 
@@ -425,6 +430,7 @@ def restart_stale_tasks(
             tasks_to_restart.add(task)
 
     for reader_task in [x for x in tasks_to_restart if x not in old_task_parent_called]:
+        engine.schedule.unschedule(reader_task)
         _, _, _ = simulate(local_register_engine, model_class, Plan([old_task_directives[reader_task]]), stop_time=engine.elapsed_time)
         register_engine(engine)  # restore the main engine
         engine.task_children_called.update(temp_engine.task_children_called)  # = {}
