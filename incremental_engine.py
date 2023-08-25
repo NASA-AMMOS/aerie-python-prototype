@@ -424,26 +424,21 @@ def restart_stale_tasks(
         else:
             tasks_to_restart.add(task)
 
-    directives_to_simulate = []
-    for reader_task in tasks_to_restart:
-        if reader_task not in old_task_parent_called:
-            directives_to_simulate.append(old_task_directives[reader_task])
-        else:
-            pass  # The parents for these should already be included in tasks_to_restart
-    _, _, _ = simulate(local_register_engine, model_class, Plan(directives_to_simulate), stop_time=engine.elapsed_time)
-    register_engine(engine)  # restore the main engine
-    engine.task_children_called.update(temp_engine.task_children_called)  # = {}
-    engine.task_children_spawned.update(temp_engine.task_children_spawned)  # = {}
-    while not temp_engine.schedule.is_empty():
-        start_offset = temp_engine.schedule.peek_next_time()
-        for task in temp_engine.schedule.get_next_batch():
-            engine.schedule.schedule(start_offset, task)
-    engine.task_start_times.update(temp_engine.task_start_times)  # = {}
-    engine.task_directives.update(temp_engine.task_directives)  # = {}
-    engine.task_inputs.update(temp_engine.task_inputs)  # = {}
-    engine.awaiting_conditions.extend(temp_engine.awaiting_conditions)  # = []
-    engine.awaiting_tasks.update(temp_engine.awaiting_tasks)  # = {}  # map from blocking task to blocked task
-    engine.spans.extend(temp_engine.spans)  # = []
+    for reader_task in [x for x in tasks_to_restart if x not in old_task_parent_called]:
+        _, _, _ = simulate(local_register_engine, model_class, Plan([old_task_directives[reader_task]]), stop_time=engine.elapsed_time)
+        register_engine(engine)  # restore the main engine
+        engine.task_children_called.update(temp_engine.task_children_called)  # = {}
+        engine.task_children_spawned.update(temp_engine.task_children_spawned)  # = {}
+        while not temp_engine.schedule.is_empty():
+            start_offset = temp_engine.schedule.peek_next_time()
+            for task in temp_engine.schedule.get_next_batch():
+                engine.schedule.schedule(start_offset, task)
+        engine.task_start_times.update(temp_engine.task_start_times)  # = {}
+        engine.task_directives.update(temp_engine.task_directives)  # = {}
+        engine.task_inputs.update(temp_engine.task_inputs)  # = {}
+        engine.awaiting_conditions.extend(temp_engine.awaiting_conditions)  # = []
+        engine.awaiting_tasks.update(temp_engine.awaiting_tasks)  # = {}  # map from blocking task to blocked task
+        engine.spans.extend(temp_engine.spans)  # = []
 
 
 def remove_task_from_spans(spans):
