@@ -328,10 +328,10 @@ def simulate(
             task_status, event_graph = engine.step(
                 task, TaskFrame(engine.elapsed_time, task=task, history=history)
             )
-            # if task in old_task_to_new_task.values():
-            #     new_task_to_events[task] = event_graph
-            # else:
-            batch_event_graph = EventGraph.concurrently(batch_event_graph, event_graph)
+            if task in old_task_to_new_task.values() and engine.task_start_times[task] == engine.elapsed_time:
+                new_task_to_events[task] = event_graph
+            else:
+                batch_event_graph = EventGraph.concurrently(batch_event_graph, event_graph)
 
         newly_invalidated_topics = EventGraph.to_set(batch_event_graph, lambda evt: evt.topic)
         stale_topics.update(newly_invalidated_topics)
@@ -351,12 +351,15 @@ def simulate(
             else:
                 engine.events.append((engine.elapsed_time, batch_event_graph))
 
-        # for old_task, new_task in list(old_task_to_new_task.items()):
-        #     engine.events, success = graft(engine.events, new_task_to_events[new_task], old_task, new_task)
-        #     if success:
-        #         del old_task_to_new_task[old_task]
-        #         del new_task_to_events[new_task]
-
+        for old_task, new_task in list(old_task_to_new_task.items()):
+            if engine.task_start_times[new_task] >= engine.elapsed_time:
+                engine.events, success = graft(engine.events, new_task_to_events[new_task], old_task, new_task)
+                if engine.events[-1][0] < engine.elapsed_time:
+                    engine.events.append((engine.elapsed_time, new_task_to_events[new_task]))
+                if success:
+                    del old_task_to_new_task[old_task]
+            else:
+                del old_task_to_new_task[old_task]
         newly_stale_readers = set()
         for start_offset, event_graph in old_events:
             filtered = EventGraph.filter_p(
@@ -486,10 +489,12 @@ def graft(history, new_events, old_task, new_task):
     any_success = False
     for x, eg in history:
         dominated, not_dominated, _ = find_all_dominated_by(eg, old_task)
-        eg, success = graft_helper(not_dominated, EventGraph.concurrently(dominated, new_events), old_task, new_task)
-        res.append((x, eg))
+        new_eg, success = graft_helper(not_dominated, EventGraph.concurrently(dominated, new_events), old_task, new_task)
         if success:
+            res.append((x, new_eg))
             any_success = True
+        else:
+            res.append((x, eg))
     return res, any_success
 
 
