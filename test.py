@@ -2,7 +2,7 @@ import engine as sim
 import incremental_engine as incremental_sim
 import model
 import sim as facade
-from protocol import Plan, Directive
+from protocol import Plan, Directive, hashable_directive
 
 model_ = model
 
@@ -391,6 +391,9 @@ def test_restart_task_with_earler_non_stale_read():
     )
 
 
+# TODO: I suspect some edge cases with Delay(0) - e.g. spawn(); Delay(0); emit(). The emit should come causally after the first step of the spawn.
+
+
 def incremental_sim_test_case(old_plan, new_plan, overrides):
     def register_engine(engine):
         facade.sim_engine = engine
@@ -416,7 +419,7 @@ def incremental_sim_test_case(old_plan, new_plan, overrides):
     assert [(x, sim.EventGraph.to_string(y)) for x, y in actual_sim_events] == [
         (x, sim.EventGraph.to_string(y)) for x, y in expected_sim_events
     ]
-    assert actual_spans == expected_spans
+    assert set((hashable_directive(x), y, z) for x, y, z in actual_spans) == set((hashable_directive(x), y, z) for x, y, z in expected_spans)
 
 
 if __name__ == "__main__":

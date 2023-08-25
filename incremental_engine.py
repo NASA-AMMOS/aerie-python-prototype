@@ -247,6 +247,8 @@ def simulate(
     for directive in plan.directives:
         engine.defer(directive.type, directive.start_time, directive.args)
 
+    old_task_to_new_task = {}
+
     for task in tasks_to_restart:
         directive = old_task_directives[task]
         deleted_tasks.add(task)
@@ -257,7 +259,8 @@ def simulate(
         if task in old_task_parent_called:
             pass
 
-        engine.defer(directive.type, directive.start_time, directive.args)
+        new_task = engine.defer(directive.type, directive.start_time, directive.args)
+        old_task_to_new_task[task] = new_task
 
     for start_offset, event_graph in old_events:
         reads = EventGraph.filter(event_graph, [SPECIAL_READ_TOPIC])
@@ -270,7 +273,6 @@ def simulate(
     restarted_tasks = set()
     stale_topics = set()
 
-    old_task_to_new_task = {}
     new_task_to_events = {}
 
     while not engine.schedule.is_empty():
@@ -352,14 +354,14 @@ def simulate(
                 engine.events.append((engine.elapsed_time, batch_event_graph))
 
         for old_task, new_task in list(old_task_to_new_task.items()):
-            if engine.task_start_times[new_task] >= engine.elapsed_time:
+            if engine.task_start_times[new_task] == engine.elapsed_time:
                 engine.events, success = graft(engine.events, new_task_to_events[new_task], old_task, new_task)
                 if engine.events[-1][0] < engine.elapsed_time:
                     engine.events.append((engine.elapsed_time, new_task_to_events[new_task]))
                 if success:
                     del old_task_to_new_task[old_task]
-            else:
-                del old_task_to_new_task[old_task]
+            # else:
+                # del old_task_to_new_task[old_task]
         newly_stale_readers = set()
         for start_offset, event_graph in old_events:
             filtered = EventGraph.filter_p(
@@ -458,12 +460,10 @@ def restart_stale_tasks(
 
     for reader_task in [x for x in tasks_to_restart if x not in old_task_parent_called]:
         engine.schedule.unschedule(reader_task)
-        # TODO: Figure out what should be in the past of this task
         if reader_task in old_task_parent_spawned:
             spawn_event_prefix = find_spawn_event(current_events + old_events, reader_task)
         else:
             spawn_event_prefix = list(current_events)
-        # Maybe slap it in old_events?
         _, _, payload = simulate(local_register_engine, model_class, Plan([old_task_directives[reader_task]]), stop_time=engine.elapsed_time, old_events=spawn_event_prefix)
         for task in temp_engine.task_start_times:
             if task not in payload["task_parent_called"] and task not in payload["task_parent_spawned"]:
