@@ -220,11 +220,7 @@ def simulate(
     deleted_tasks=None,
     old_task_directives=None,
     old_task_parent_spawned=None,
-    old_task_parent_called=None,
-    old_task_children_spawned=None,
-    old_task_children_called=None,
-    # tasks_to_restart=None,
-    stale_topics=None  # map from topic to time at which it became stale
+    old_task_parent_called=None
 ):
     if old_events is None:
         old_events = []
@@ -236,13 +232,7 @@ def simulate(
         old_task_parent_spawned = {}
     if old_task_parent_called is None:
         old_task_parent_called = {}
-    if old_task_children_spawned is None:
-        old_task_children_spawned = {}
-    if old_task_children_called is None:
-        old_task_children_called = {}
     old_events_bk = list(old_events)
-    # if tasks_to_restart is None:
-    #     tasks_to_restart = set()
     engine = SimulationEngine()
     engine.register_model(model_class)
     register_engine(engine)
@@ -250,19 +240,6 @@ def simulate(
         engine.defer(directive.type, directive.start_time, directive.args)
 
     old_task_to_new_task = {}
-
-    # for task in tasks_to_restart:
-    #     directive = old_task_directives[task]
-    #     deleted_tasks.add(task)
-    #
-    #     # TODO splice the task into its spawn point
-    #     if task in old_task_parent_spawned:
-    #         pass
-    #     if task in old_task_parent_called:
-    #         pass
-    #
-    #     new_task = engine.defer(directive.type, directive.start_time, directive.args)
-    #     old_task_to_new_task[task] = new_task
 
     for start_offset, event_graph in old_events:
         if engine.task_start_times and start_offset <= min(engine.task_start_times.values()):
@@ -319,6 +296,17 @@ def simulate(
                 if set(read.value).intersection(set(topic for topic, start_offset in stale_topics.items() if start_offset <= engine.elapsed_time)):
                     tasks_to_restart.add(read.progeny)
 
+        tasks_to_restart_bk = tasks_to_restart
+        worklist = list(tasks_to_restart)
+        tasks_to_restart = set()
+        while worklist:
+            task = worklist.pop()
+            parent_task = old_task_parent_spawned.get(task, old_task_parent_called.get(task, None))
+            if parent_task not in tasks_to_restart_bk:
+                tasks_to_restart.add(task)
+            else:
+                deleted_tasks.add(task)
+
         if tasks_to_restart:
             old_task_to_new_task.update(restart_stale_tasks(
                 register_engine, model_class, engine, tasks_to_restart, old_task_directives, old_task_parent_called, old_task_parent_spawned, list(engine.events), list(filter_history(old_events, restarted_tasks.union(deleted_tasks)))
@@ -341,16 +329,6 @@ def simulate(
                         stale_topics[topic] = min(start_offset, stale_topics[topic])
                     else:
                         stale_topics[topic] = start_offset
-
-            # TODO: Find all topics invalidated by any restarted task or any of its children in the future of now
-
-            # for i in range(len(old_events)):
-                # start_offset, event_graph = old_events[i]
-                # old_events[i] = (
-                #     start_offset,
-                #     EventGraph.filter_p(event_graph, lambda evt: evt.progeny not in restarted_tasks),
-                # )
-            # old_events = [x for x in old_events if not EventGraph.is_empty(x[1])]
             for task in batch_tasks:
                 engine.schedule.schedule(engine.elapsed_time, task)
             continue  # In order to process all tasks at this time in parallel, we re-schedule the batch tasks and start the loop over
@@ -682,89 +660,15 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
             deleted_tasks.extend(payload["task_children_called"][task])
             worklist.extend(payload["task_children_called"][task])
 
-    first = True
-
-    stale_tasks = set()
-
-    new_stale_tasks = set()
-
-    deleted_events = []
-    while first or new_stale_tasks:
-        first = False
-
-        for start_offset, event_graph in payload["events"]:
-            deleted = EventGraph.filter_p(
-                event_graph, lambda evt: evt.progeny in deleted_tasks or evt.progeny in stale_tasks
-            )
-            if not EventGraph.is_empty(deleted):
-                deleted_events.append((start_offset, deleted))
-
-        # A read is stale if it contains a deleted event or a new event to one of its topics in its history
-
-        # TODO re-simulate stale reads
-        reads_and_deleted_events = EventGraph.empty()
-        for start_offset, event_graph in payload["events"]:
-            filtered = EventGraph.filter_p(
-                event_graph,
-                lambda evt: evt.topic == SPECIAL_READ_TOPIC
-                or evt.progeny in deleted_tasks
-                or evt.progeny in stale_tasks,
-            )
-            reads_and_deleted_events = EventGraph.sequentially(reads_and_deleted_events, filtered)
-
-        stale_reads = get_stale_reads(reads_and_deleted_events)
-        new_stale_tasks = {
-            x.progeny for x in stale_reads if x.progeny not in deleted_tasks and x.progeny not in stale_tasks
-        }
-
-        worklist = list(new_stale_tasks)
-        while worklist:
-            task = worklist.pop()
-            if task in payload["task_children_spawned"]:
-                new_stale_tasks.update(payload["task_children_spawned"][task])
-                worklist.extend(payload["task_children_spawned"][task])
-            if task in payload["task_children_called"]:
-                new_stale_tasks.update(payload["task_children_called"][task])
-                worklist.extend(payload["task_children_called"][task])
-        stale_tasks.update(new_stale_tasks)
-
-    task_to_directive = {task: directive for directive, task in payload["plan_directive_to_task"].items()}
-
-    stale_tasks_bk = set(stale_tasks)
-    worklist = list(stale_tasks)
-    stale_tasks = set()
-    while worklist:
-        task = worklist.pop()
-        parent_task = payload["task_parent_spawned"].get(task, payload["task_parent_called"].get(task, None))
-        if parent_task is None or parent_task not in stale_tasks_bk:
-            stale_tasks.add(task)
-        else:
-            deleted_tasks.append(task)
-
-    # stale_directives = [restore_directive(task_to_directive[task]) for task in stale_tasks]
-
-    directives_to_simulate = added_directives  # + stale_directives
-
-    old_events_without_deleted_tasks = []
-    for start_offset, event_graph in payload["events"]:
-        filtered = EventGraph.filter_p(
-            event_graph, lambda evt: evt.progeny not in deleted_tasks and evt.progeny not in stale_tasks
-        )
-        if not EventGraph.is_empty(filtered):
-            old_events_without_deleted_tasks.append((start_offset, filtered))
-
     new_spans, new_events, new_payload = simulate(
         register_engine,
         model_class,
-        Plan(directives_to_simulate),
-        old_events=list(payload["events"]),  #old_events_without_deleted_tasks,
+        Plan(added_directives),
+        old_events=list(payload["events"]),
         deleted_tasks=set(deleted_tasks),
         old_task_directives=payload["task_directives"],
         old_task_parent_called=payload["task_parent_called"],
-        old_task_parent_spawned=payload["task_parent_spawned"],
-        old_task_children_called=payload["task_children_called"],
-        old_task_children_spawned=payload["task_children_spawned"],
-        # tasks_to_restart=stale_tasks
+        old_task_parent_spawned=payload["task_parent_spawned"]
     )
 
     old_spans = list(payload["spans"])
@@ -777,7 +681,6 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
     for deleted_directive in deleted_directives:
         old_spans = [x for x in old_spans if x[0] != deleted_directive]
     old_spans = [x for x in old_spans if x[0][2] not in deleted_tasks]
-    # old_spans = [x for x in old_spans if x[0] not in stale_directives]
     return (
         sorted(remove_task_from_spans(old_spans) + new_spans, key=lambda x: (x[1], x[2])),
         without_special_events(collapse_simultaneous(new_events, EventGraph.sequentially)),

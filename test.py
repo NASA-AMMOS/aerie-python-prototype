@@ -290,7 +290,7 @@ def test_conditional_decomposition():
                 Directive("conditional_decomposition", 3, {"_": 2}),
             ]
         ),
-        {},
+        {"reading_child": error_on_rerun("reading_child")},
     )
 
 
