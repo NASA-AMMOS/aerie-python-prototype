@@ -270,6 +270,9 @@ def simulate(
     restarted_tasks = set()
     stale_topics = set()
 
+    old_task_to_new_task = {}
+    new_task_to_events = {}
+
     while not engine.schedule.is_empty():
         resume_time = engine.schedule.peek_next_time()
         if stop_time is not None and resume_time >= stop_time:
@@ -294,12 +297,9 @@ def simulate(
                     tasks_to_restart.add(read.progeny)
 
         if tasks_to_restart:
-            to_graft = restart_stale_tasks(
+            old_task_to_new_task.update(restart_stale_tasks(
                 register_engine, model_class, engine, tasks_to_restart, old_task_directives, old_task_parent_called, old_task_parent_spawned, list(engine.events), list(old_events)
-            )
-
-            # for task, event_graph in to_graft.items():
-            #     old_events[0] = old_events[0][0], graft(old_events[0][1], event_graph, task, None)
+            ))
 
             restarted_tasks.update(tasks_to_restart)
 
@@ -315,10 +315,22 @@ def simulate(
             continue  # In order to process all tasks at this time in parallel, we re-schedule the batch tasks and start the loop over
 
         batch_event_graph = EventGraph.empty()
+
         for task in batch_tasks:
+            if task in old_task_to_new_task.values():
+                old_task = [x for x, y in old_task_to_new_task.items() if y == task][0]
+                if old_task in old_task_parent_spawned and engine.task_start_times[task] == engine.elapsed_time:
+                    history = find_spawn_event(engine.events + old_events, old_task)
+                else:
+                    history = engine.events
+            else:
+                history = engine.events
             task_status, event_graph = engine.step(
-                task, TaskFrame(engine.elapsed_time, task=task, history=engine.events)
+                task, TaskFrame(engine.elapsed_time, task=task, history=history)
             )
+            # if task in old_task_to_new_task.values():
+            #     new_task_to_events[task] = event_graph
+            # else:
             batch_event_graph = EventGraph.concurrently(batch_event_graph, event_graph)
 
         newly_invalidated_topics = EventGraph.to_set(batch_event_graph, lambda evt: evt.topic)
@@ -338,6 +350,12 @@ def simulate(
                 )
             else:
                 engine.events.append((engine.elapsed_time, batch_event_graph))
+
+        # for old_task, new_task in list(old_task_to_new_task.items()):
+        #     engine.events, success = graft(engine.events, new_task_to_events[new_task], old_task, new_task)
+        #     if success:
+        #         del old_task_to_new_task[old_task]
+        #         del new_task_to_events[new_task]
 
         newly_stale_readers = set()
         for start_offset, event_graph in old_events:
@@ -433,7 +451,7 @@ def restart_stale_tasks(
         else:
             tasks_to_restart.add(task)
 
-    to_graft = {}
+    old_task_to_new_task = {}
 
     for reader_task in [x for x in tasks_to_restart if x not in old_task_parent_called]:
         engine.schedule.unschedule(reader_task)
@@ -443,15 +461,10 @@ def restart_stale_tasks(
         else:
             spawn_event_prefix = list(current_events)
         # Maybe slap it in old_events?
-        def _():
-            _, _, payload = simulate(local_register_engine, model_class, Plan([old_task_directives[reader_task]]), stop_time=engine.elapsed_time, old_events=spawn_event_prefix)
-            return payload
-        payload = _()
-        # payload["events"]
-        # [(x, y) for x, y in payload["events"] if x < engine.elapsed_time]  # these should match exactly
-        if reader_task in old_task_parent_spawned:
-            new_events = EventGraph.empty()  # [(x, y) for x, y in payload["events"] if x == engine.elapsed_time][0][1]
-            to_graft[reader_task] = new_events  # these need to be grafted on
+        _, _, payload = simulate(local_register_engine, model_class, Plan([old_task_directives[reader_task]]), stop_time=engine.elapsed_time, old_events=spawn_event_prefix)
+        for task in temp_engine.task_start_times:
+            if task not in payload["task_parent_called"] and task not in payload["task_parent_spawned"]:
+                old_task_to_new_task[reader_task] = task
         register_engine(engine)  # restore the main engine
         engine.task_children_called.update(temp_engine.task_children_called)  # = {}
         engine.task_children_spawned.update(temp_engine.task_children_spawned)  # = {}
@@ -465,36 +478,79 @@ def restart_stale_tasks(
         engine.awaiting_conditions.extend(temp_engine.awaiting_conditions)  # = []
         engine.awaiting_tasks.update(temp_engine.awaiting_tasks)  # = {}  # map from blocking task to blocked task
         engine.spans.extend(temp_engine.spans)  # = []
-    return to_graft
+    return old_task_to_new_task
 
 
-def graft(event_graph, new_events, old_task, new_task):
+def graft(history, new_events, old_task, new_task):
+    res = []
+    any_success = False
+    for x, eg in history:
+        dominated, not_dominated, _ = find_all_dominated_by(eg, old_task)
+        eg, success = graft_helper(not_dominated, EventGraph.concurrently(dominated, new_events), old_task, new_task)
+        res.append((x, eg))
+        if success:
+            any_success = True
+    return res, any_success
+
+
+def graft_helper(event_graph, new_events, old_task, new_task, suffix=EventGraph.empty()):
     if type(event_graph) == EventGraph.Empty:
-        return EventGraph.empty()
+        return EventGraph.empty(), False
     if type(event_graph) == EventGraph.Atom:
         evt = event_graph.value
         if evt.topic == SPECIAL_SPAWN_TOPIC and evt.value == old_task:
-            return EventGraph.Sequentially(EventGraph.atom(Event(SPECIAL_SPAWN_TOPIC, new_task, event_graph.value.progeny)), new_events)
+            return EventGraph.sequentially(EventGraph.atom(Event(SPECIAL_SPAWN_TOPIC, new_task, event_graph.value.progeny)), EventGraph.concurrently(new_events, suffix)), True
         else:
-            return event_graph
+            return event_graph, False
     if type(event_graph) == EventGraph.Sequentially:
-        return EventGraph.sequentially(graft(event_graph.prefix, new_events, old_task, new_task), graft(event_graph.suffix, new_events, old_task, new_task))
+        prefix, prefix_found = graft_helper(event_graph.prefix, new_events, old_task, new_task)
+        suffix, suffix_found = graft_helper(event_graph.suffix, new_events, old_task, new_task)
+        return EventGraph.sequentially(prefix, suffix), prefix_found or suffix_found
     if type(event_graph) == EventGraph.Concurrently:
-        return EventGraph.concurrently(graft(event_graph.left, new_events, old_task, new_task),
-                                       graft(event_graph.right, new_events, old_task, new_task))
+        left, left_found = graft_helper(event_graph.left, new_events, old_task, new_task)
+        right, right_found = graft_helper(event_graph.right, new_events, old_task, new_task)
+        return EventGraph.concurrently(left, right), left_found or right_found
     raise ValueError("Not an event_graph: " + str(event_graph))
 
 
-def find_spawn_event(old_events, reader_task):
+def find_all_dominated_by(event_graph, old_task):
+    if type(event_graph) == EventGraph.Empty:
+        return EventGraph.empty(), EventGraph.empty(), False
+    if type(event_graph) == EventGraph.Atom:
+        evt = event_graph.value
+        if evt.topic == SPECIAL_SPAWN_TOPIC and evt.value == old_task:
+            return EventGraph.empty(), event_graph, True
+        else:
+            return event_graph, EventGraph.empty(), False
+    if type(event_graph) == EventGraph.Sequentially:
+        prefix_dominated, prefix_not_dominated, prefix_found = find_all_dominated_by(event_graph.prefix, old_task)
+        suffix_dominated, suffix_not_dominated, suffix_found = find_all_dominated_by(event_graph.suffix, old_task)
+        if prefix_found:
+            return EventGraph.sequentially(prefix_dominated, suffix_dominated), EventGraph.sequentially(prefix_not_dominated, suffix_not_dominated), True
+        if suffix_found:
+            return suffix_dominated, EventGraph.sequentially(event_graph.prefix, suffix_not_dominated), True
+        return EventGraph.empty(), event_graph, False
+    if type(event_graph) == EventGraph.Concurrently:
+        left_dominated, left_not_dominated, left_found = find_all_dominated_by(event_graph.left, old_task)
+        right_dominated, right_not_dominated, right_found = find_all_dominated_by(event_graph.right, old_task)
+        if left_found:
+            return left_dominated, EventGraph.concurrently(left_not_dominated, event_graph.right), True
+        if right_found:
+            return right_dominated, EventGraph.concurrently(event_graph.left, right_not_dominated), True
+        return EventGraph.empty(), event_graph, False
+    raise ValueError("Not an event_graph: " + str(event_graph))
+
+
+def find_spawn_event(history, task):
     res = []
-    for x, eg in old_events:
-        prefix = get_prefix(eg, lambda evt: evt.topic == SPECIAL_SPAWN_TOPIC and evt.value == reader_task)
+    for x, eg in history:
+        prefix = get_prefix(eg, lambda evt: evt.topic == SPECIAL_SPAWN_TOPIC and evt.value == task)
         if prefix is None:
             res.append((x, eg))
         else:
             res.append((x, prefix))
             return res
-    raise ValueError("Could not find " + repr(reader_task) + " in " + repr(old_events))
+    raise ValueError("Could not find " + repr(task) + " in " + repr(history))
 
 
 def get_prefix(event_graph, f):

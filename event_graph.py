@@ -48,7 +48,10 @@ class EventGraph:
             else:
                 return res
         if type(event_graph) == EventGraph.Concurrently:
-            res = f"{EventGraph.to_string(event_graph.left, parent=type(event_graph), str=str)}|{EventGraph.to_string(event_graph.right, parent=type(event_graph), str=str)}"
+            left_str = EventGraph.to_string(event_graph.left, parent=type(event_graph), str=str)
+            right_str = EventGraph.to_string(event_graph.right, parent=type(event_graph), str=str)
+            left_str, right_str = sorted([left_str, right_str])
+            res = f"{left_str}|{right_str}"
             if parent == EventGraph.Sequentially:
                 return f"({res})"
             else:
