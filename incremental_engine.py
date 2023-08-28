@@ -59,7 +59,7 @@ class SimulationEngine:
         self.current_task_frame.emit(SPECIAL_SPAWN_TOPIC, task)
         self.task_start_times[task] = self.elapsed_time
         parent_task_frame = self.current_task_frame
-        task_frame = TaskFrame(self.elapsed_time, task=task, history=parent_task_frame._get_visible_history())
+        task_frame = TaskFrame(self.elapsed_time, parent_task_frame._get_visible_history(), task=task)
         task_status, events = self.step(task, task_frame)
         if parent_task_frame.task is not None:
             if is_call:
@@ -127,9 +127,7 @@ class SimulationEngine:
 class TaskFrame:
     Branch = namedtuple("Branch", "base event_graph")
 
-    def __init__(self, elapsed_time, history=None, task=None):
-        if history is None:
-            history = []
+    def __init__(self, elapsed_time, history, task=None):
         self.elapsed_time = elapsed_time
         self.task = task
         self.tip = EventGraph.empty()
@@ -317,7 +315,7 @@ def simulate(
             else:
                 history = engine.events
             task_status, event_graph = engine.step(
-                task, TaskFrame(engine.elapsed_time, task=task, history=history)
+                task, TaskFrame(engine.elapsed_time, history, task=task)
             )
             if task in [restarted_tasks[x] for x in restarted_tasks_not_yet_grafted] and engine.task_start_times[task] == engine.elapsed_time:
                 new_task_to_events[task] = event_graph
@@ -375,7 +373,7 @@ def simulate(
         condition_reads = EventGraph.empty()
         while old_awaiting_conditions:
             condition, task = old_awaiting_conditions.pop()
-            engine.current_task_frame = TaskFrame(engine.elapsed_time, history=engine.events, task=task)
+            engine.current_task_frame = TaskFrame(engine.elapsed_time, engine.events, task=task)
             if condition():
                 engine.schedule.schedule(engine.elapsed_time, task)
             else:
@@ -559,9 +557,9 @@ def find_all_dominated_by(event_graph, old_task):
         left_dominated, left_not_dominated, left_found = find_all_dominated_by(event_graph.left, old_task)
         right_dominated, right_not_dominated, right_found = find_all_dominated_by(event_graph.right, old_task)
         if left_found:
-            return left_dominated, EventGraph.concurrently(left_not_dominated, event_graph.right), True
+            return left_dominated, EventGraph.concurrently(left_not_dominated, event_graph.right), True  # TODO: Untested
         if right_found:
-            return right_dominated, EventGraph.concurrently(event_graph.left, right_not_dominated), True
+            return right_dominated, EventGraph.concurrently(event_graph.left, right_not_dominated), True  # TODO: Untested
         return EventGraph.empty(), event_graph, False
     raise ValueError("Not an event_graph: " + str(event_graph))
 
@@ -598,7 +596,7 @@ def get_prefix(event_graph, f):
         if not res_p is None:
             return res_p
         return EventGraph.sequentially(event_graph.prefix, res_s)
-    if type(event_graph) == EventGraph.Concurrently:
+    if type(event_graph) == EventGraph.Concurrently:  # TODO: Untested
         res_l = get_prefix(event_graph.left, f)
         res_r = get_prefix(event_graph.right, f)
         if res_l is not None:
@@ -643,6 +641,7 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
     while worklist:
         task = worklist.pop()
         if task in payload["task_children_spawned"]:
+            # TODO: Untested
             deleted_tasks.extend(payload["task_children_spawned"][task])
             worklist.extend(payload["task_children_spawned"][task])
         if task in payload["task_children_called"]:
