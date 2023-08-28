@@ -244,9 +244,9 @@ def simulate(
         reads = EventGraph.filter(event_graph, [SPECIAL_READ_TOPIC])
         if not EventGraph.is_empty(reads):
             engine.schedule.schedule(start_offset, reads)
-    restarted_tasks = set()  # Every restarted task has an old task (key) and a corresponding new task (value)
-    old_task_to_new_task = {}
+    restarted_tasks = {}  # Every restarted task has an old task (key) and a corresponding new task (value)
     stale_topics = {}  # map of topic to time at which it became stale
+    restarted_tasks_not_yet_grafted = set()
     new_task_to_events = {}  # tracks events emitted by restarted tasks.
     while not engine.schedule.is_empty():
         resume_time = engine.schedule.peek_next_time()
@@ -255,7 +255,7 @@ def simulate(
         engine.elapsed_time = resume_time
         while old_events and old_events[0][0] < resume_time:
             next_old_events = old_events.pop(0)
-            engine.events.append((next_old_events[0], EventGraph.filter_p(next_old_events[1], lambda evt: evt.progeny not in restarted_tasks.union(deleted_tasks))))
+            engine.events.append((next_old_events[0], EventGraph.filter_p(next_old_events[1], lambda evt: evt.progeny not in set(restarted_tasks).union(deleted_tasks))))
         batch = engine.schedule.get_next_batch()
         batch_reads = [x for x in batch if EventGraph.is_event_graph(x)]
         batch_tasks = [x for x in batch if not EventGraph.is_event_graph(x)]
@@ -264,7 +264,7 @@ def simulate(
         tasks_to_restart = set()
         while tasks_to_restart != prev_tasks_to_restart:
             prev_tasks_to_restart = set(tasks_to_restart)
-            affected_topics = get_topics_affected_by_tasks(old_events_bk, restarted_tasks.union(deleted_tasks).union(tasks_to_restart))
+            affected_topics = get_topics_affected_by_tasks(old_events_bk, set(restarted_tasks).union(deleted_tasks).union(tasks_to_restart))
             stale_topics = dict_union(stale_topics, affected_topics, lambda a, b: min(a, b))
             for read_graph in batch_reads:
                 for read in EventGraph.to_set(read_graph):
@@ -287,19 +287,29 @@ def simulate(
             else:
                 deleted_tasks.add(task)
         if tasks_to_restart:
-            old_task_to_new_task.update(restart_stale_tasks(
-                register_engine, model_class, engine, tasks_to_restart, old_task_directives, old_task_parent_called, old_task_parent_spawned, list(engine.events), list(filter_history(old_events, restarted_tasks.union(deleted_tasks)))
-            ))
-            restarted_tasks.update(tasks_to_restart)
+            worklist = list(tasks_to_restart)
+            tasks_to_restart = set()
+            while worklist:
+                task = worklist.pop()
+                if task in old_task_parent_called:
+                    worklist.append(old_task_parent_called[task])
+                    deleted_tasks.add(task)
+                else:
+                    tasks_to_restart.add(task)
+            newly_restarted_tasks = restart_stale_tasks(register_engine, model_class, engine, tasks_to_restart, old_task_directives,
+                                        old_task_parent_called, old_task_parent_spawned, list(engine.events),
+                                        list(filter_history(old_events, set(restarted_tasks).union(deleted_tasks))))
+            restarted_tasks_not_yet_grafted.update(newly_restarted_tasks)
+            restarted_tasks.update(newly_restarted_tasks)
             for task in batch_tasks:
                 engine.schedule.schedule(engine.elapsed_time, task)
             continue  # In order to process all tasks at this time in parallel, we re-schedule the batch tasks and start the loop over
         batch_event_graph = EventGraph.empty()
         for task in batch_tasks:
-            if task in old_task_to_new_task.values():
-                old_task = [x for x, y in old_task_to_new_task.items() if y == task][0]
+            if task in [restarted_tasks[x] for x in restarted_tasks_not_yet_grafted]:
+                old_task = [x for x in restarted_tasks_not_yet_grafted if restarted_tasks[x] == task][0]
                 if old_task in old_task_parent_spawned and engine.task_start_times[task] == engine.elapsed_time:
-                    history = find_spawn_event(engine.events + filter_history(old_events, restarted_tasks.union(deleted_tasks)), old_task)
+                    history = find_spawn_event(engine.events + filter_history(old_events, set(restarted_tasks).union(deleted_tasks)), old_task)
                 else:
                     history = engine.events
             else:
@@ -307,7 +317,7 @@ def simulate(
             task_status, event_graph = engine.step(
                 task, TaskFrame(engine.elapsed_time, task=task, history=history)
             )
-            if task in old_task_to_new_task.values() and engine.task_start_times[task] == engine.elapsed_time:
+            if task in [restarted_tasks[x] for x in restarted_tasks_not_yet_grafted] and engine.task_start_times[task] == engine.elapsed_time:
                 new_task_to_events[task] = event_graph
             else:
                 batch_event_graph = EventGraph.concurrently(batch_event_graph, event_graph)
@@ -318,19 +328,19 @@ def simulate(
             else:
                 stale_topics[topic] = engine.elapsed_time
         if old_events and old_events[0][0] == resume_time:
-            batch_event_graph = EventGraph.concurrently(batch_event_graph, EventGraph.filter_p(old_events.pop(0)[1], lambda evt: evt.progeny not in restarted_tasks.union(deleted_tasks)))
+            batch_event_graph = EventGraph.concurrently(batch_event_graph, EventGraph.filter_p(old_events.pop(0)[1], lambda evt: evt.progeny not in set(restarted_tasks).union(deleted_tasks)))
         if old_events and old_events[0][0] == resume_time:
             raise ValueError("Duplicate resume time in old_events:", resume_time)
         extend_history(engine.events, engine.elapsed_time, batch_event_graph)
-        for old_task, new_task in list(old_task_to_new_task.items()):
+        for old_task, new_task in [(x, restarted_tasks[x]) for x in restarted_tasks_not_yet_grafted]:
             if engine.task_start_times[new_task] == engine.elapsed_time:
                 engine.events, success = graft(engine.events, new_task_to_events[new_task], old_task, new_task)
                 if engine.events and engine.events[-1][0] < engine.elapsed_time:
                     engine.events.append((engine.elapsed_time, new_task_to_events[new_task]))
                 if success:
-                    del old_task_to_new_task[old_task]
+                    restarted_tasks_not_yet_grafted.remove(old_task)
             if engine.task_start_times[new_task] < engine.elapsed_time:
-                del old_task_to_new_task[old_task]
+                restarted_tasks_not_yet_grafted.remove(old_task)
         newly_stale_readers = set()
         for start_offset, event_graph in old_events:
             filtered = EventGraph.filter_p(
@@ -462,15 +472,6 @@ def restart_stale_tasks(
         nonlocal temp_engine
         temp_engine = engine
         register_engine(engine)
-
-    worklist = list(tasks_to_restart)
-    tasks_to_restart = set()
-    while worklist:
-        task = worklist.pop()
-        if task in old_task_parent_called:
-            worklist.append(old_task_parent_called[task])
-        else:
-            tasks_to_restart.add(task)
 
     old_task_to_new_task = {}
 
