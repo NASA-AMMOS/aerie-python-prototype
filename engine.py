@@ -183,6 +183,7 @@ def simulate(register_engine, model_class, plan):
         engine.awaiting_conditions.clear()
         while old_awaiting_conditions:
             condition, task = old_awaiting_conditions.pop()
+            engine.current_task_frame = TaskFrame(engine.elapsed_time, history=engine.events)
             if condition():
                 engine.schedule.schedule(engine.elapsed_time, task)
             else:

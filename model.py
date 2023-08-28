@@ -146,7 +146,7 @@ def conditional_decomposition(model, _):
     if model.x.get() == 1:
         spawn("reading_child", {})
     else:
-        spawn("emit_event", {"topic": "u", "value": 2, "_": "_"})
+        spawn("emit_event", {"topic": "u", "value": 2, "_": _})
     if False:
         yield
 
@@ -167,6 +167,21 @@ def delay_zero_between_spawns(model, _):
     spawn("conditional_decomposition", {"_": _})
     yield Delay(0)
     spawn("conditional_decomposition", {"_": _})
+
+
+def await_condition_set_by_child(model, _):
+    model.x.set(9)
+    spawn("maybe_delay_then_emit", {"_": _})
+    yield AwaitCondition(model.x > 9)
+    model.x.set(11)
+    yield Delay(5)
+
+
+def maybe_delay_then_emit(model, _):
+    if model.y.get() == 1:
+        yield Delay(20)
+    model.x.set(10)
+    yield Delay(3)
 
 
 class Model:
@@ -199,6 +214,8 @@ class Model:
             parent_of_parent_of_conditional_decomposition,
             read_emit_three_times_and_whoopee,
             parent_of_read_emit_three_times_and_whoopee,
-            delay_zero_between_spawns
+            delay_zero_between_spawns,
+            await_condition_set_by_child,
+            maybe_delay_then_emit
         ]
         return {x.__name__: x for x in activity_types}
