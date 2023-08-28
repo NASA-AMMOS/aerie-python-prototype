@@ -270,31 +270,33 @@ def simulate(
         batch_reads = [x for x in batch if EventGraph.is_event_graph(x)]
         batch_tasks = [x for x in batch if not EventGraph.is_event_graph(x)]
 
-        affected_topics = {}
-        for start_offset, event_graph in old_events_bk:
-            filtered = EventGraph.filter_p(
-                event_graph,
-                lambda evt: evt.progeny in restarted_tasks.union(deleted_tasks)
-            )
-            for topic in EventGraph.to_set(filtered, lambda evt: evt.topic):
-                affected_topics[topic] = start_offset
+        prev_tasks_to_restart = None
+        tasks_to_restart = set()
+        while tasks_to_restart != prev_tasks_to_restart:
+            prev_tasks_to_restart = set(tasks_to_restart)
+            affected_topics = {}
+            for start_offset, event_graph in old_events_bk:
+                filtered = EventGraph.filter_p(
+                    event_graph,
+                    lambda evt: evt.progeny in restarted_tasks.union(deleted_tasks).union(tasks_to_restart)
+                )
+                for topic in EventGraph.to_set(filtered, lambda evt: evt.topic):
+                    affected_topics[topic] = start_offset
 
-        if affected_topics:
             for topic, start_offset in affected_topics.items():
                 if topic in stale_topics:
                     stale_topics[topic] = min(start_offset, stale_topics[topic])
                 else:
                     stale_topics[topic] = start_offset
 
-        # TODO do something with batch_reads
-        tasks_to_restart = set()
-        for read_graph in batch_reads:
-            for read in EventGraph.to_set(read_graph):
-                if read.progeny in restarted_tasks or read.progeny in deleted_tasks:
-                    continue
-                # TODO check if it's stale
-                if set(read.value).intersection(set(topic for topic, start_offset in stale_topics.items() if start_offset <= engine.elapsed_time)):
-                    tasks_to_restart.add(read.progeny)
+            # TODO do something with batch_reads
+            for read_graph in batch_reads:
+                for read in EventGraph.to_set(read_graph):
+                    if read.progeny in restarted_tasks or read.progeny in deleted_tasks:
+                        continue
+                    # TODO check if it's stale
+                    if set(read.value).intersection(set(topic for topic, start_offset in stale_topics.items() if start_offset <= engine.elapsed_time)):
+                        tasks_to_restart.add(read.progeny)
 
         tasks_to_restart_bk = tasks_to_restart
         worklist = list(tasks_to_restart)
@@ -684,7 +686,7 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
     return (
         sorted(remove_task_from_spans(old_spans) + new_spans, key=lambda x: (x[1], x[2])),
         without_special_events(collapse_simultaneous(new_events, EventGraph.sequentially)),
-        None,
+        payload,
     )
 
 

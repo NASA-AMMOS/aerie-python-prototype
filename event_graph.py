@@ -159,3 +159,9 @@ class EventGraph:
         if type(event_graph) == EventGraph.Concurrently:
             return False
         raise ValueError("Not an event_graph: " + str(event_graph))
+
+
+EventGraph.Empty.__repr__ = EventGraph.to_string
+EventGraph.Atom.__repr__ = EventGraph.to_string
+EventGraph.Sequentially.__repr__ = EventGraph.to_string
+EventGraph.Concurrently.__repr__ = EventGraph.to_string
