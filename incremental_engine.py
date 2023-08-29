@@ -230,6 +230,7 @@ def simulate(
         old_task_parent_spawned = {}
     if old_task_parent_called is None:
         old_task_parent_called = {}
+    task_parent = dict_union(old_task_parent_spawned, old_task_parent_called)  # useful when you don't care if it was spawned or called
     all_events_from_previous_sim = old_events
     engine = SimulationEngine()
     engine.register_model(model_class)
@@ -271,21 +272,11 @@ def simulate(
                         continue
                     if set(read.value).intersection(set(topic for topic, start_offset in stale_topics.items() if start_offset <= engine.elapsed_time)):
                         tasks_to_restart.add(read.progeny)
-        # remove_children_whose_parents_are_present(tasks_to_restart, dict_union(old_task_parent_spawned, old_task_parent_called))
         """
         Remove child tasks from tasks_to_restart when their parent is also in tasks_to_restart.
         Add those child tasks to deleted_tasks
         """
-        tasks_to_restart_bk = tasks_to_restart
-        worklist = list(tasks_to_restart)
-        tasks_to_restart = set()
-        while worklist:
-            task = worklist.pop()
-            parent_task = old_task_parent_spawned.get(task, old_task_parent_called.get(task, None))
-            if parent_task not in tasks_to_restart_bk:
-                tasks_to_restart.add(task)
-            else:
-                deleted_tasks.add(task)
+        tasks_to_restart = remove_children_whose_parents_are_present(tasks_to_restart, task_parent, deleted_tasks)
         if tasks_to_restart:
             """
             Restart the tasks. At the end, all tasks have been stepped up to a time prior to engine.elapsed time,
@@ -409,6 +400,20 @@ def simulate(
     return filtered_spans, without_special_events(engine.events), payload
 
 
+def remove_children_whose_parents_are_present(tasks_to_restart, task_parent, deleted_tasks):
+    tasks_to_restart_bk = tasks_to_restart
+    worklist = list(tasks_to_restart)
+    tasks_to_restart = set()
+    while worklist:
+        task = worklist.pop()
+        parent_task = task_parent.get(task, None)
+        if parent_task not in tasks_to_restart_bk:
+            tasks_to_restart.add(task)
+        else:
+            deleted_tasks.add(task)
+    return tasks_to_restart
+
+
 def extend_history(history, elapsed_time, events):
     if history and history[-1][0] > elapsed_time:
         raise ValueError("Time in history must be monotonically increasing: " + str(history) + ", " + str(elapsed_time) + ", " + str(events))
@@ -422,10 +427,14 @@ def extend_history(history, elapsed_time, events):
     else:
         history.append((elapsed_time, events))
 
-# def remove_children_whose_parents_are_present(tasks_to_restart, dict_union(old_task_parent_spawned, old_task_parent_called)):
-#     pass
 
-def dict_union(a, b, on_conflict=lambda a, b: a):
+def raise_error(message):
+    def f():
+        raise ValueError(message)
+    return f
+
+
+def dict_union(a, b, on_conflict=raise_error("No conflict resolution method was defined")):
     """
     Returns the union of dictionaries a and b.
 
