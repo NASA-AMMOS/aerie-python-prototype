@@ -343,11 +343,22 @@ def simulate(
                     stale_topics[topic] = min(engine.elapsed_time, stale_topics[topic])
                 else:
                     stale_topics[topic] = engine.elapsed_time
-            if future_events_from_previous_sim and future_events_from_previous_sim[0][0] == resume_time:
-                batch_event_graph = EventGraph.concurrently(batch_event_graph, EventGraph.filter_p(future_events_from_previous_sim.pop(0)[1], lambda evt: evt.progeny not in set(restarted_tasks).union(deleted_tasks)))
+
+            """
+            Include old events in the batch_event graph
+            """
+            previous_eg = EventGraph.empty()
+            while future_events_from_previous_sim and future_events_from_previous_sim[0][0] == resume_time:
+                previous_eg = EventGraph.sequentially(previous_eg, EventGraph.filter_p(future_events_from_previous_sim.pop(0)[1], lambda evt: evt.progeny not in set(restarted_tasks).union(deleted_tasks)))
+            batch_event_graph = EventGraph.concurrently(batch_event_graph, previous_eg)
             if future_events_from_previous_sim and future_events_from_previous_sim[0][0] == resume_time:
                 raise ValueError("Duplicate resume time in old_events:", resume_time)
+
             extend_history(engine.events, engine.elapsed_time, batch_event_graph)
+
+            """
+            Graft events from new_task_to_events into engine.events
+            """
             for old_task, new_task in [(x, restarted_tasks[x]) for x in restarted_tasks_not_yet_grafted]:
                 if engine.task_start_times[new_task] == engine.elapsed_time:
                     engine.events, success = graft(engine.events, new_task_to_events[new_task], old_task, new_task)
@@ -357,6 +368,12 @@ def simulate(
                         restarted_tasks_not_yet_grafted.remove(old_task)
                 if engine.task_start_times[new_task] < engine.elapsed_time:
                     restarted_tasks_not_yet_grafted.remove(old_task)
+
+            """
+            Identify future stale reads, and remove all events from stale readers from the future, since we expect them to be restarted.
+            
+            TODO: Does this even make sense?
+            """
             newly_stale_readers = set()
             for start_offset, event_graph in future_events_from_previous_sim:
                 filtered = EventGraph.filter_p(
@@ -376,6 +393,10 @@ def simulate(
                     )
                 future_events_from_previous_sim = [x for x in future_events_from_previous_sim if not EventGraph.is_empty(x[1])]
                 # TODO What about events emitted by children?
+
+            """
+            Check conditions
+            """
             old_awaiting_conditions = list(engine.awaiting_conditions)
             engine.awaiting_conditions.clear()
             condition_reads = EventGraph.empty()
@@ -409,7 +430,7 @@ def simulate(
         "deleted_tasks": deleted_tasks.union(restarted_tasks),
     }
     filtered_spans = remove_task_from_spans(spans)
-    return filtered_spans, without_special_events(engine.events), payload
+    return filtered_spans, collapse_simultaneous(without_special_events(engine.events), EventGraph.sequentially), payload
 
 
 def remove_children_whose_parents_are_present(tasks_to_restart, task_parent, deleted_tasks):
@@ -431,13 +452,13 @@ def extend_history(history, elapsed_time, events):
         raise ValueError("Time in history must be monotonically increasing: " + str(history) + ", " + str(elapsed_time) + ", " + str(events))
     if EventGraph.is_empty(events):
         return
-    if history and history[-1][0] == elapsed_time:
-        history[-1] = (
-            elapsed_time,
-            EventGraph.sequentially(history[-1][1], events),
-        )
-    else:
-        history.append((elapsed_time, events))
+    # if history and history[-1][0] == elapsed_time:
+    #     history[-1] = (
+    #         elapsed_time,
+    #         EventGraph.sequentially(history[-1][1], events),
+    #     )
+    # else:
+    history.append((elapsed_time, events))
 
 
 def raise_error(message):
