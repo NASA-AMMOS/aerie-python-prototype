@@ -550,6 +550,26 @@ def test_condition_satisfied_at_new_time():
     )
 
 
+def test_condition_satisfied_just_after_spawn():
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("emit_event", 0, {"topic": "x", "value": 1, "_": 2}),
+                Directive("await_y_greater_than", 10, {"value": 1}),
+                Directive("spawns_reading_child", 12, {})
+            ]
+        ),
+        Plan(
+            [
+                Directive("emit_event", 0, {"topic": "x", "value": 0, "_": 2}),
+                Directive("await_y_greater_than", 10, {"value": 1}),
+                Directive("spawns_reading_child", 12, {})
+            ]
+        ),
+        {}
+    )
+
+
 def incremental_sim_test_case(old_plan, new_plan, overrides):
     def register_engine(engine):
         facade.sim_engine = engine
