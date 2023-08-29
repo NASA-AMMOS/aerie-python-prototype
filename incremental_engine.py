@@ -637,6 +637,10 @@ def graft_helper(event_graph, new_events, old_task, new_task, suffix=EventGraph.
 
 
 def find_all_dominated_by(event_graph, old_task):
+    """
+    x is dominated if all paths from origin to x lead through spawn(old_task)
+    not dominated is the original graph without the dominated nodes
+    """
     if type(event_graph) == EventGraph.Empty:
         return EventGraph.empty(), EventGraph.empty(), False
     if type(event_graph) == EventGraph.Atom:
@@ -649,7 +653,7 @@ def find_all_dominated_by(event_graph, old_task):
         prefix_dominated, prefix_not_dominated, prefix_found = find_all_dominated_by(event_graph.prefix, old_task)
         suffix_dominated, suffix_not_dominated, suffix_found = find_all_dominated_by(event_graph.suffix, old_task)
         if prefix_found:
-            return EventGraph.sequentially(prefix_dominated, suffix_dominated), EventGraph.sequentially(prefix_not_dominated, suffix_not_dominated), True
+            return EventGraph.sequentially(prefix_dominated, event_graph.suffix), prefix_not_dominated, True
         if suffix_found:
             return suffix_dominated, EventGraph.sequentially(event_graph.prefix, suffix_not_dominated), True
         return EventGraph.empty(), event_graph, False
