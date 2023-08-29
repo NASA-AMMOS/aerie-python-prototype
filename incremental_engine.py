@@ -1,7 +1,7 @@
 # This is a simplified Aerie for prototyping purposes
 from collections import namedtuple
 import inspect
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 
 from protocol import (
     Completed,
@@ -10,15 +10,11 @@ from protocol import (
     Directive,
     Call,
     Plan,
-    tuple_args,
     hashable_directive,
-    restore_directive,
 )
 from event_graph import EventGraph
 
 Event = namedtuple("Event", "topic value progeny")
-
-# Event.__repr__ = lambda evt: f"{evt.topic}:{evt.value}{{{evt.progeny.__name__}}}"
 
 EventHistory = List[Tuple[int, EventGraph]]
 
@@ -315,19 +311,24 @@ def simulate(
                     task, TaskFrame(engine.elapsed_time, history, task=task)
                 )
                 if type(task_status) == Completed:
+                    """
+                    Move future reads of the ("FINISH", restarted_task) topic to now.
+                    """
                     for t, batch in list(engine.schedule._schedule.items()):
                         for eg in batch:
                             if EventGraph.is_event_graph(eg):
-                                caller = EventGraph.to_set(eg, lambda evt:
-                                    evt.progeny if
-                                    evt.topic == "READ" and
-                                    type(evt.value[0]) == tuple and
-                                    len(evt.value[0]) == 2 and
-                                    evt.value[0][0] == "FINISH" and
-                                    evt.value[0][1] in restarted_tasks else False)
-                                caller = [x for x in caller if x]
+                                caller = EventGraph.to_set(
+                                    EventGraph.filter_p(
+                                        eg,
+                                        lambda evt: (evt.topic == "READ" and
+                                                     type(evt.value[0]) == tuple and
+                                                     len(evt.value[0]) == 2 and
+                                                     evt.value[0][0] == "FINISH" and
+                                                     evt.value[0][1] in restarted_tasks and
+                                                     restarted_tasks[evt.value[0][1]] == task)),
+                                    lambda evt: evt.progeny)
                                 if caller:
-                                    caller = caller[0]
+                                    caller, = caller  # unpack a single-item set. The comma is crucial.
                                     engine.schedule.unschedule(EventGraph.atom(Event("READ", (make_finish_topic(task),), caller)))
                                     engine.schedule.schedule(engine.elapsed_time, EventGraph.atom(Event("READ", (make_finish_topic(task),), caller)))
                 if task in [restarted_tasks[x] for x in restarted_tasks_not_yet_grafted] and engine.task_start_times[task] == engine.elapsed_time:

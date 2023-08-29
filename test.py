@@ -260,6 +260,33 @@ def test_called_activity():
     )
 
 
+def test_called_activity_resume_later():
+    """
+    Parent -> child
+    child reads x and delays for x
+
+    Change plan with a new write to x
+
+    Parent should emit its second event later
+    """
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("emit_event", 2, {"topic": "z", "value": 1, "_": 10}),
+                Directive("emit_event", 5, {"topic": "x", "value": 1, "_": 1}),
+                Directive("parent_of_reading_child", 10, {}),
+            ]
+        ),
+        Plan(
+            [
+                Directive("emit_event", 2, {"topic": "z", "value": 1, "_": 10}),
+                Directive("parent_of_reading_child", 10, {}),
+            ]
+        ),
+        {"emit_event": error_on_rerun("emit_event", lambda kwargs: kwargs["_"] == 10)},
+    )
+
+
 def test_deleted_read():
     incremental_sim_test_case(
         Plan(
