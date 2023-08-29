@@ -1,6 +1,3 @@
-import threading
-import time
-
 import engine as sim
 import incremental_engine as incremental_sim
 import model
