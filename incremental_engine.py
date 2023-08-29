@@ -40,7 +40,7 @@ class SimulationEngine:
         self.task_start_times = {}
         self.task_directives = {}
         self.task_inputs = {}
-        self.awaiting_conditions = []
+        self.awaiting_conditions = []  # tuple (condition, task)
         self.awaiting_tasks = {}  # map from blocking task to blocked task
         self.spans = []
 
@@ -101,10 +101,10 @@ class SimulationEngine:
                     self.elapsed_time,
                 )
             )
+            task_frame.emit(make_finish_topic(task), "FINISHED")
             if task in self.awaiting_tasks:
                 self.schedule.schedule(self.elapsed_time, self.awaiting_tasks[task])
                 resuming_caller_task = self.awaiting_tasks[task]
-                task_frame.emit(make_finish_topic(task), "FINISHED")
                 del self.awaiting_tasks[task]
         elif type(task_status) == Call:
             child_task = make_task(self.model, task_status.child_task, task_status.args)
@@ -191,9 +191,9 @@ class JobSchedule:
                 raise Exception("Double scheduling task: " + str(task))
         self._schedule[start_offset].append(task)
 
-    def unschedule(self, task):
+    def unschedule(self, task, allow_event_graph=False):
         for _, batch in self._schedule.items():
-            if task in batch and not EventGraph.is_event_graph(task):
+            if task in batch and (allow_event_graph or not EventGraph.is_event_graph(task)):
                 batch.remove(task)
 
     def peek_next_time(self):
@@ -220,6 +220,9 @@ def simulate(
     old_task_parent_spawned=None,
     old_task_parent_called=None
 ):
+    """
+    Initialization of mutable keyword arguments, because python is... python
+    """
     if old_events is None:
         old_events = []
     if deleted_tasks is None:
@@ -230,14 +233,19 @@ def simulate(
         old_task_parent_spawned = {}
     if old_task_parent_called is None:
         old_task_parent_called = {}
-    task_parent = dict_union(old_task_parent_spawned, old_task_parent_called)  # useful when you don't care if it was spawned or called
-    all_events_from_previous_sim = old_events
-    engine = SimulationEngine()
-    engine.register_model(model_class)
-    register_engine(engine)
-    for directive in plan.directives:
+
+    all_events_from_previous_sim = old_events  # this variable name is to differentiate from future_events_from_previous_sim, introduced further down
+
+    """
+    Prepare for simulation
+    """
+    old_task_parent = dict_union(old_task_parent_spawned, old_task_parent_called)  # useful when you don't care if it was spawned or called
+    engine = SimulationEngine()  # keeps track of what's next to do
+    engine.register_model(model_class)  # creates a new instance of the model class
+    register_engine(engine)  # this is a hook for the called to be able to hold a reference to the engine. Called here to give a chance to override activities for testing.
+    for directive in plan.directives:  # Add all plan directives to the schedule
         engine.defer(directive.type, directive.start_time, directive.args)
-    for start_offset, event_graph in all_events_from_previous_sim:
+    for start_offset, event_graph in all_events_from_previous_sim:  # Add READ events from the previous sim to the schedule, so we remember to check whether they're stale
         if engine.task_start_times and start_offset <= min(engine.task_start_times.values()):
             continue
         reads = EventGraph.filter(event_graph, [SPECIAL_READ_TOPIC])
@@ -245,9 +253,9 @@ def simulate(
             engine.schedule.schedule(start_offset, reads)
     restarted_tasks = {}  # Every restarted task has an old task (key) and a corresponding new task (value)
     stale_topics = {}  # map of topic to time at which it became stale
-    restarted_tasks_not_yet_grafted = set()
+    restarted_tasks_not_yet_grafted = set()  # to-do list of tasks that have been restarted, but not stepped yet. If they are newly spawned, they will need to be grafted
     new_task_to_events = {}  # tracks events emitted by restarted tasks.
-    future_events_from_previous_sim = list(old_events)
+    future_events_from_previous_sim = list(old_events)  # tracks events from the previous simulation that have not yet been added to engine.events
     while not engine.schedule.is_empty():
         resume_time = engine.schedule.peek_next_time()
         if stop_time is not None and resume_time >= stop_time:
@@ -259,6 +267,7 @@ def simulate(
         batch = engine.schedule.get_next_batch()
         batch_reads = [x for x in batch if EventGraph.is_event_graph(x)]
         batch_tasks = [x for x in batch if not EventGraph.is_event_graph(x)]
+
         # Iterate to a fixed point, marking topics stale as more tasks are added to tasks_to_restart
         prev_tasks_to_restart = None
         tasks_to_restart = set()
@@ -276,27 +285,41 @@ def simulate(
         Remove child tasks from tasks_to_restart when their parent is also in tasks_to_restart.
         Add those child tasks to deleted_tasks
         """
-        tasks_to_restart = remove_children_whose_parents_are_present(tasks_to_restart, task_parent, deleted_tasks)
+        tasks_to_restart = remove_children_whose_parents_are_present(tasks_to_restart, old_task_parent, deleted_tasks)
         if tasks_to_restart:
+            # Make sure to restart the parent if the child was called, not spawned
+            # worklist = list(tasks_to_restart)
+            # tasks_to_restart = set()
+            # while worklist:
+            #     task = worklist.pop()
+            #     if task in old_task_parent_called:
+            #         worklist.append(old_task_parent_called[task])
+            #         deleted_tasks.add(task)
+            #     else:
+            #         tasks_to_restart.add(task)
             """
             Restart the tasks. At the end, all tasks have been stepped up to a time prior to engine.elapsed time,
             and scheduled to resume at engine.elapsed time.
             """
-            worklist = list(tasks_to_restart)
-            tasks_to_restart = set()
-            while worklist:
-                task = worklist.pop()
-                if task in old_task_parent_called:
-                    worklist.append(old_task_parent_called[task])
-                    deleted_tasks.add(task)
-                else:
-                    tasks_to_restart.add(task)
             newly_restarted_tasks = restart_stale_tasks(register_engine, model_class, engine, tasks_to_restart, old_task_directives,
                                                         old_task_parent_called, old_task_parent_spawned, list(engine.events),
-                                                        list(filter_history(future_events_from_previous_sim, set(restarted_tasks).union(deleted_tasks))))
+                                                        all_events_from_previous_sim)
             # At this point, the restarted tasks have been scheduled to execute in the next time step
             restarted_tasks_not_yet_grafted.update(newly_restarted_tasks)
             restarted_tasks.update(newly_restarted_tasks)
+
+            # Replace all future reads of restarted task finished events with the new task
+            # for t, batch in list(engine.schedule._schedule.items()):
+            #     new_batch = []
+            #     for eg in batch:
+            #         if EventGraph.is_event_graph(eg):
+            #             new_batch.append(EventGraph.map(eg, lambda evt: Event(evt.topic, (make_finish_topic(newly_restarted_tasks[evt.value[0][1]])), evt.progeny) if evt.topic == "READ" and type(evt.value[0]) == tuple and len(evt.value[0]) == 2 and evt.value[0][0] == "FINISH" and evt.value[0][1] in newly_restarted_tasks else evt))
+            #         else:
+            #             new_batch.append(eg)
+            #         if eg != new_batch[-1]:
+            #             print()
+            #     engine.schedule._schedule[t] = new_batch
+
             for task in batch_tasks:
                 engine.schedule.schedule(engine.elapsed_time, task)
         else:  # If there are no tasks to restart
@@ -304,8 +327,8 @@ def simulate(
             for task in batch_tasks:
                 if task in [restarted_tasks[x] for x in restarted_tasks_not_yet_grafted]:
                     old_task = [x for x in restarted_tasks_not_yet_grafted if restarted_tasks[x] == task][0]
-                    if old_task in old_task_parent_spawned and engine.task_start_times[task] == engine.elapsed_time:
-                        history = find_spawn_event(engine.events + filter_history(future_events_from_previous_sim, set(restarted_tasks).union(deleted_tasks)), old_task)
+                    if old_task in old_task_parent and engine.task_start_times[task] == engine.elapsed_time:
+                        history = engine.events + [find_spawn_event(all_events_from_previous_sim, old_task)[-1]]
                     else:
                         history = engine.events
                 else:
@@ -313,11 +336,29 @@ def simulate(
                 task_status, event_graph = engine.step(
                     task, TaskFrame(engine.elapsed_time, history, task=task)
                 )
+                if type(task_status) == Completed:
+                    for t, batch in list(engine.schedule._schedule.items()):
+                        for eg in batch:
+                            if EventGraph.is_event_graph(eg):
+                                caller = EventGraph.to_set(eg, lambda evt:
+                                    evt.progeny if
+                                    evt.topic == "READ" and
+                                    type(evt.value[0]) == tuple and
+                                    len(evt.value[0]) == 2 and
+                                    evt.value[0][0] == "FINISH" and
+                                    evt.value[0][1] in restarted_tasks else False)
+                                caller = [x for x in caller if x]
+                                if caller:
+                                    caller = caller[0]
+                                    engine.schedule.unschedule(EventGraph.atom(Event("READ", (make_finish_topic(task),), caller)))
+                                    engine.schedule.schedule(engine.elapsed_time, EventGraph.atom(Event("READ", (make_finish_topic(task),), caller)))
                 if task in [restarted_tasks[x] for x in restarted_tasks_not_yet_grafted] and engine.task_start_times[task] == engine.elapsed_time:
                     new_task_to_events[task] = event_graph
                 else:
                     batch_event_graph = EventGraph.concurrently(batch_event_graph, event_graph)
             newly_invalidated_topics = EventGraph.to_set(batch_event_graph, lambda evt: evt.topic)
+            for new_events in new_task_to_events.values():
+                newly_invalidated_topics.update(EventGraph.to_set(new_events, lambda evt: evt.topic))
             for topic in newly_invalidated_topics:
                 if topic in stale_topics:
                     stale_topics[topic] = min(engine.elapsed_time, stale_topics[topic])
@@ -347,14 +388,6 @@ def simulate(
                 )
                 newly_stale_readers.update(EventGraph.to_set(filtered, lambda evt: evt.progeny))
             if newly_stale_readers:
-                worklist = list(newly_stale_readers)
-                while worklist:
-                    reader = worklist.pop(0)
-                    if reader in old_task_parent_called:
-                        # If the stale read is in a child activity, restart the parent???
-                        # Can we do better??? Can we use the spans?
-                        newly_stale_readers.add(old_task_parent_called[reader])
-                        worklist.append(old_task_parent_called[reader])
                 # Filter out all events from these tasks in the future
                 for i in range(len(future_events_from_previous_sim)):
                     start_offset, event_graph = future_events_from_previous_sim[i]
@@ -429,7 +462,7 @@ def extend_history(history, elapsed_time, events):
 
 
 def raise_error(message):
-    def f():
+    def f(a, b):
         raise ValueError(message)
     return f
 
@@ -479,44 +512,95 @@ def filter_history(history, deleted_tasks):
     return res
 
 
-
 def restart_stale_tasks(
-    register_engine, model_class, engine, tasks_to_restart, old_task_directives, old_task_parent_called, old_task_parent_spawned, current_events, old_events
+    register_engine, model_class, engine, tasks_to_restart, old_task_directives, old_task_parent_called, old_task_parent_spawned, current_events, all_old_events
 ):
-    temp_engine: Optional[SimulationEngine] = None
-
-    def local_register_engine(engine):
-        nonlocal temp_engine
-        temp_engine = engine
-        register_engine(engine)
-
     old_task_to_new_task = {}
 
-    for reader_task in [x for x in tasks_to_restart if x not in old_task_parent_called]:
+    for reader_task in tasks_to_restart:
         engine.schedule.unschedule(reader_task)
-        if reader_task in old_task_parent_spawned:
-            spawn_event_prefix = find_spawn_event(current_events + old_events, reader_task)
+        if reader_task in old_task_parent_spawned or reader_task in old_task_parent_called:
+            spawn_event_prefix = find_spawn_event(all_old_events, reader_task)[-1]
         else:
-            spawn_event_prefix = list(current_events)
-        _, _, payload = simulate(local_register_engine, model_class, Plan([old_task_directives[reader_task]]), stop_time=engine.elapsed_time, old_events=spawn_event_prefix)
-        for task in temp_engine.task_start_times:
-            if task not in payload["task_parent_called"] and task not in payload["task_parent_spawned"]:
-                old_task_to_new_task[reader_task] = task
-        register_engine(engine)  # restore the main engine
-        engine.task_children_called.update(temp_engine.task_children_called)  # = {}
-        engine.task_children_spawned.update(temp_engine.task_children_spawned)  # = {}
-        while not temp_engine.schedule.is_empty():
-            start_offset = temp_engine.schedule.peek_next_time()
-            for task in temp_engine.schedule.get_next_batch():
-                engine.schedule.schedule(start_offset, task)
-        engine.task_start_times.update(temp_engine.task_start_times)  # = {}
-        engine.task_directives.update(temp_engine.task_directives)  # = {}
-        engine.task_inputs.update(temp_engine.task_inputs)  # = {}
-        engine.awaiting_conditions.extend(temp_engine.awaiting_conditions)  # = []
-        engine.awaiting_tasks.update(temp_engine.awaiting_tasks)  # = {}  # map from blocking task to blocked task
-        engine.spans.extend(temp_engine.spans)  # = []
+            spawn_event_prefix = (old_task_directives[reader_task].start_time, EventGraph.empty())
+        task, status = step_up_single_task(register_engine, model_class, old_task_directives[reader_task].type,
+                            old_task_directives[reader_task].start_time, old_task_directives[reader_task].args,
+                            engine.elapsed_time, all_old_events, spawn_event_prefix)
+        register_engine(engine)
+        # engine.task_children_called.update(temp_engine.task_children_called)  # = {}
+        # engine.task_children_spawned.update(temp_engine.task_children_spawned)  # = {}
+        engine.task_start_times[task] = old_task_directives[reader_task].start_time
+        engine.task_directives[task] = old_task_directives[reader_task]
+        engine.task_inputs[task] = (old_task_directives[reader_task].type, old_task_directives[reader_task].args)
+        if type(status) == AwaitCondition:
+            engine.awaiting_conditions.append((status.condition, task))
+        if type(status) == Delay:
+            engine.schedule.schedule(engine.elapsed_time, task)
+        if type(status) == Call:
+            # Assume that the reason we're restarting this task is because the child has just finished
+            engine.schedule.schedule(engine.elapsed_time, task)
+        old_task_to_new_task[reader_task] = task
+
+    assert set(old_task_to_new_task) == tasks_to_restart, f"{set(old_task_to_new_task)} != {tasks_to_restart}"
     return old_task_to_new_task
 
+
+def step_up_single_task(register_engine, model_class, directive_type, start_offset, arguments, stop_time, history, spawn_prefix):
+    """
+    Steps up the given task using old events, ignoring spawns and calls, up to the given time
+    """
+    engine = SimulationEngine()  # keeps track of what's next to do
+    engine.register_model(model_class)  # creates a new instance of the model class
+    register_engine(engine)  # this is a hook for the called to be able to hold a reference to the engine. Called here to give a chance to override activities for testing.
+    task = engine.defer(directive_type, start_offset, arguments)
+    elapsed_time = start_offset
+    future_history = list(history)
+    past_history = list()
+    status = Delay(0)
+    first_step = True
+    while elapsed_time < stop_time:
+        while future_history and future_history[0][0] < elapsed_time:
+            past_history.append(future_history.pop(0))
+        if first_step:
+            task_frame = TaskFrame(elapsed_time, past_history + [spawn_prefix], task=task)
+            first_step = False
+        else:
+            task_frame = TaskFrame(engine.elapsed_time, past_history, task=task)
+        engine.current_task_frame = task_frame
+        try:
+            status = next(task)
+        except StopIteration:
+            status = Completed()
+        if type(status) == Delay:
+            elapsed_time += status.duration
+        elif type(status) == AwaitCondition:
+            task_frame = TaskFrame(engine.elapsed_time, past_history, task=task)
+            engine.current_task_frame = task_frame
+            condition_satisfied = False
+            if status.condition():
+                condition_satisfied = True
+            while future_history and not condition_satisfied:
+                past_history.append(future_history.pop(0))
+                elapsed_time = past_history[-1][0]
+                if elapsed_time >= stop_time:
+                    return task, status
+                task_frame = TaskFrame(engine.elapsed_time, past_history, task=task)
+                engine.current_task_frame = task_frame
+                if status.condition():
+                    condition_satisfied = True
+                    break
+            if condition_satisfied:
+                continue
+            else:
+                break
+        elif type(status) == Completed:
+            raise ValueError("Restarted task finished before reaching stop time")
+        elif type(status) == Call:
+            # TODO don't run the child, but look up when the child finished so we can wake up at the right time
+            break
+        else:
+            raise ValueError("Unhandled task status: " + str(status))
+    return task, status
 
 def graft(history, new_events, old_task, new_task):
     res = []

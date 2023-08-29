@@ -127,7 +127,7 @@ class EventGraph:
     @staticmethod
     def to_set(event_graph, f=lambda x: x):
         if type(event_graph) == EventGraph.Empty:
-            return event_graph
+            return set()
         if type(event_graph) == EventGraph.Atom:
             return {f(event_graph.value)}
         if type(event_graph) == EventGraph.Sequentially:
