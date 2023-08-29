@@ -486,6 +486,23 @@ def test_await_child_condition():
     )
 
 
+def test_called_activity_multiple():
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("call_multiple", 10, {"_": 1}),
+            ]
+        ),
+        Plan(
+            [
+                Directive("emit_event", 5, {"topic": "x", "value": 1, "_": 2}),
+                Directive("call_multiple", 10, {"_": 1}),
+            ]
+        ),
+        {}
+    )
+
+
 def incremental_sim_test_case(old_plan, new_plan, overrides):
     def register_engine(engine):
         facade.sim_engine = engine

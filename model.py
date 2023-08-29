@@ -170,6 +170,20 @@ def maybe_delay_then_emit(model, _):
     yield Delay(3)
 
 
+def call_multiple(model, _):
+    yield Call("emit_and_delay", {"delay": 1, "topic": "u", "value": 2, "_": _})
+
+    yield Call("emit_and_delay", {"delay": model.x.get(), "topic": "u", "value": 3, "_": _})
+
+    yield Call("emit_and_delay", {"delay": 1, "topic": "u", "value": 4, "_": _})
+
+
+def emit_and_delay(model, topic, value, delay, _):
+    import sim as facade
+    facade.sim_engine.current_task_frame.emit(topic, value)
+    yield Delay(delay)
+
+
 class Model:
     def __init__(self):
         self.x = Register("x", 55)
@@ -202,6 +216,8 @@ class Model:
             parent_of_read_emit_three_times_and_whoopee,
             delay_zero_between_spawns,
             await_condition_set_by_child,
-            maybe_delay_then_emit
+            maybe_delay_then_emit,
+            call_multiple,
+            emit_and_delay
         ]
         return {x.__name__: x for x in activity_types}

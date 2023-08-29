@@ -287,16 +287,6 @@ def simulate(
         """
         tasks_to_restart = remove_children_whose_parents_are_present(tasks_to_restart, old_task_parent, deleted_tasks)
         if tasks_to_restart:
-            # Make sure to restart the parent if the child was called, not spawned
-            # worklist = list(tasks_to_restart)
-            # tasks_to_restart = set()
-            # while worklist:
-            #     task = worklist.pop()
-            #     if task in old_task_parent_called:
-            #         worklist.append(old_task_parent_called[task])
-            #         deleted_tasks.add(task)
-            #     else:
-            #         tasks_to_restart.add(task)
             """
             Restart the tasks. At the end, all tasks have been stepped up to a time prior to engine.elapsed time,
             and scheduled to resume at engine.elapsed time.
@@ -307,18 +297,6 @@ def simulate(
             # At this point, the restarted tasks have been scheduled to execute in the next time step
             restarted_tasks_not_yet_grafted.update(newly_restarted_tasks)
             restarted_tasks.update(newly_restarted_tasks)
-
-            # Replace all future reads of restarted task finished events with the new task
-            # for t, batch in list(engine.schedule._schedule.items()):
-            #     new_batch = []
-            #     for eg in batch:
-            #         if EventGraph.is_event_graph(eg):
-            #             new_batch.append(EventGraph.map(eg, lambda evt: Event(evt.topic, (make_finish_topic(newly_restarted_tasks[evt.value[0][1]])), evt.progeny) if evt.topic == "READ" and type(evt.value[0]) == tuple and len(evt.value[0]) == 2 and evt.value[0][0] == "FINISH" and evt.value[0][1] in newly_restarted_tasks else evt))
-            #         else:
-            #             new_batch.append(eg)
-            #         if eg != new_batch[-1]:
-            #             print()
-            #     engine.schedule._schedule[t] = new_batch
 
             for task in batch_tasks:
                 engine.schedule.schedule(engine.elapsed_time, task)
@@ -527,8 +505,6 @@ def restart_stale_tasks(
                             old_task_directives[reader_task].start_time, old_task_directives[reader_task].args,
                             engine.elapsed_time, all_old_events, spawn_event_prefix)
         register_engine(engine)
-        # engine.task_children_called.update(temp_engine.task_children_called)  # = {}
-        # engine.task_children_spawned.update(temp_engine.task_children_spawned)  # = {}
         engine.task_start_times[task] = old_task_directives[reader_task].start_time
         engine.task_directives[task] = old_task_directives[reader_task]
         engine.task_inputs[task] = (old_task_directives[reader_task].type, old_task_directives[reader_task].args)
@@ -596,7 +572,7 @@ def step_up_single_task(register_engine, model_class, directive_type, start_offs
         elif type(status) == Completed:
             raise ValueError("Restarted task finished before reaching stop time")
         elif type(status) == Call:
-            # TODO don't run the child, but look up when the child finished so we can wake up at the right time
+            # TODO: What if the task calls multiple children?
             break
         else:
             raise ValueError("Unhandled task status: " + str(status))
