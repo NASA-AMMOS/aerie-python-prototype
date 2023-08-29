@@ -503,11 +503,41 @@ def test_called_activity_multiple():
     )
 
 
+def test_condition_satisfied_at_new_time():
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("emit_event", 0, {"topic": "x", "value": 0, "_": 2}),
+                Directive("await_x_greater_than", 10, {"value": 100}),
+                Directive("emit_event", 12, {"topic": "x", "value": 101, "_": 2}),
+            ]
+        ),
+        Plan(
+            [
+                Directive("emit_event", 0, {"topic": "x", "value": 0, "_": 2}),
+                Directive("await_x_greater_than", 10, {"value": 100}),
+                Directive("emit_event", 13, {"topic": "x", "value": 101, "_": 2}),
+            ]
+        ),
+        {}
+    )
+
+
 def incremental_sim_test_case(old_plan, new_plan, overrides):
     def register_engine(engine):
         facade.sim_engine = engine
 
-    _, _, payload = incremental_sim.simulate(register_engine, model.Model, old_plan)
+    spans_1, events_1, payload = incremental_sim.simulate(register_engine, model.Model, old_plan)
+
+    def _():
+        """
+        Additional assertion for sanity: checks that incremental_sim.simulate and sim.simulate match on the old plan
+        """
+        expected_old_spans, expected_old_sim_events, _ = sim.simulate(register_engine, model.Model, old_plan)
+        assert [(x, sim.EventGraph.to_string(y)) for x, y in events_1] == [(x, sim.EventGraph.to_string(y)) for x, y in expected_old_sim_events]
+        assert set((hashable_directive(x), y, z) for x, y, z in spans_1) == set(
+            (hashable_directive(x), y, z) for x, y, z in expected_old_spans)
+    _()
 
     expected_spans, expected_sim_events, _ = sim.simulate(register_engine, model.Model, new_plan)
 

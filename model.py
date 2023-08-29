@@ -184,6 +184,13 @@ def emit_and_delay(model, topic, value, delay, _):
     yield Delay(delay)
 
 
+def await_x_greater_than(model, value):
+    import sim as facade
+    facade.sim_engine.current_task_frame.emit("u", 1)
+    yield AwaitCondition(model.x > value)
+    facade.sim_engine.current_task_frame.emit("u", 2)
+
+
 class Model:
     def __init__(self):
         self.x = Register("x", 55)
@@ -218,6 +225,7 @@ class Model:
             await_condition_set_by_child,
             maybe_delay_then_emit,
             call_multiple,
-            emit_and_delay
+            emit_and_delay,
+            await_x_greater_than
         ]
         return {x.__name__: x for x in activity_types}
