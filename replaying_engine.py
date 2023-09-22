@@ -1,0 +1,297 @@
+# This is a simplified Aerie for prototyping purposes
+from collections import namedtuple
+import inspect
+
+from plan_diff import diff
+from protocol import Completed, Delay, AwaitCondition, Call, Directive, Plan, hashable_directive
+from event_graph import EventGraph
+
+Event = namedtuple("Event", "topic value")
+TaskId = namedtuple("TaskId", "id label")
+
+__task_id_counter = 0
+def fresh_task_id(label=""):
+    global __task_id_counter
+    __task_id_counter += 1
+    return TaskId(__task_id_counter, label)
+
+class SimulationEngine:
+    def __init__(self):
+        self.action_log = []
+        self.elapsed_time = 0
+        self.events = []  # list of tuples (start_offset, event_graph)
+        self.current_task_frame = TaskFrame(self.elapsed_time)
+        self.schedule = JobSchedule()
+        self.model = None  # Filled in by register_model
+        self.activity_types_by_name = None  # Filled in by register_model
+        self.task_start_times = {}
+        self.task_directives = {}
+        self.task_inputs = {}
+        self.awaiting_conditions = []
+        self.awaiting_tasks = {}  # map from blocking task to blocked task
+        self.spans = []
+        self.tasks = {}
+
+    def register_model(self, cls):
+        self.model = cls()
+        self.activity_types_by_name = self.model.get_activity_types()
+        return self.model
+
+    def spawn(self, directive_type, arguments):
+        task = make_task(self.model, directive_type, arguments)
+        task_id = fresh_task_id(repr(task))
+        self.current_task_frame.action_log.append(("spawn", task_id, directive_type, arguments))
+        self.tasks[task_id] = task
+        self.task_inputs[task_id] = (directive_type, arguments)
+        self.task_directives[task_id] = Directive(directive_type, self.elapsed_time, arguments)
+        self.spawn_task(task_id, task)
+        return task_id
+
+    def spawn_task(self, task_id, task):
+        self.task_start_times[task_id] = self.elapsed_time
+        parent_task_frame = self.current_task_frame
+        task_status, events = self.step(task_id, task)
+        parent_task_frame.spawn(events)
+        self.current_task_frame = parent_task_frame
+
+    def defer(self, directive_type, duration, arguments):
+        task = make_task(self.model, directive_type, arguments)
+        task_id = fresh_task_id(repr(task))
+        self.schedule.schedule(self.elapsed_time + duration, task_id)
+        self.task_start_times[task_id] = self.elapsed_time + duration
+        self.task_inputs[task_id] = (directive_type, arguments)
+        self.task_directives[task_id] = Directive(directive_type, self.elapsed_time + duration, arguments)
+        self.tasks[task_id] = task
+        return task_id, task
+
+    def step(self, task_id, task):
+        self.current_task_frame = TaskFrame(self.elapsed_time, task_id=task_id, history=self.current_task_frame.get_visible_history())
+        try:
+            task_status = next(task)
+        except StopIteration:
+            task_status = Completed()
+        if type(task_status) == Delay:
+            self.schedule.schedule(self.elapsed_time + task_status.duration, task_id)
+        elif type(task_status) == AwaitCondition:
+            self.awaiting_conditions.append((task_status.condition, task_id))
+        elif type(task_status) == Completed:
+            self.spans.append(
+                (
+                    self.task_directives.get(
+                        task_id, (self.task_inputs[task_id][0], self.task_inputs[task_id][1])
+                    ),
+                    self.task_start_times[task_id],
+                    self.elapsed_time,
+                )
+            )
+            if task_id in self.awaiting_tasks:
+                self.schedule.schedule(self.elapsed_time, self.awaiting_tasks[task_id])
+                del self.awaiting_tasks[task_id]
+        elif type(task_status) == Call:
+            child_task = make_task(self.model, task_status.child_task, task_status.args)
+            child_task_id = fresh_task_id(repr(child_task))
+            self.tasks[child_task_id] = child_task
+            self.awaiting_tasks[child_task_id] = task_id
+            self.task_inputs[child_task_id] = (task_status.child_task, task_status.args)
+            self.task_directives[child_task_id] = Directive(task_status.child_task, self.elapsed_time, task_status.args)
+            self.spawn_task(child_task_id, child_task)
+        else:
+            raise ValueError("Unhandled task status: " + str(task_status))
+        self.action_log.extend(self.current_task_frame.action_log)
+        self.action_log.append((task_id, "yield", task_status))
+        return task_status, self.current_task_frame.collect()
+
+
+class TaskFrame:
+    Branch = namedtuple("Branch", "base event_graph")
+
+    def __init__(self, elapsed_time, task_id=None, history=None):
+        if history is None:
+            history = []
+        self.task_id = task_id
+        self.tip = EventGraph.empty()
+        self.history = history
+        self.branches = []
+        self.elapsed_time = elapsed_time
+        self.action_log = []
+
+    def emit(self, topic, value):
+        self.action_log.append((self.task_id, "emit", topic, value))
+        self.tip = EventGraph.sequentially(self.tip, EventGraph.Atom(Event(topic, value)))
+
+    def read(self, topic_or_topics):
+        self.action_log.append((self.task_id, "read", topic_or_topics))
+        topics = [topic_or_topics] if type(topic_or_topics) != list else topic_or_topics
+        res = []
+        for start_offset, x in self.get_visible_history():
+            filtered = EventGraph.filter(x, topics)
+            if type(filtered) != EventGraph.Empty:
+                res.append((start_offset, filtered))
+        return res
+
+    def spawn(self, event_graph):
+        self.branches.append((self.tip, event_graph))
+        self.tip = EventGraph.empty()
+
+    def get_visible_history(self):
+        res = EventGraph.empty()
+        for base, _ in self.branches:
+            res = EventGraph.sequentially(res, base)
+        res = EventGraph.sequentially(res, self.tip)
+        return self.history + [(self.elapsed_time, res)]
+
+    def collect(self):
+        res = self.tip
+        for base, event_graph in reversed(self.branches):
+            res = EventGraph.sequentially(base, EventGraph.concurrently(event_graph, res))
+        return res
+
+
+def make_task(model, directive_type, arguments):
+    func = model.get_activity_types()[directive_type]
+    if inspect.isgeneratorfunction(func):
+        return func.__call__(model, **arguments)
+    else:
+        return make_generator(func, dict(**arguments, model=model))
+
+
+class JobSchedule:
+    def __init__(self):
+        self._schedule = {}
+
+    def schedule(self, start_offset, task_id):
+        if start_offset not in self._schedule:
+            self._schedule[start_offset] = []
+        for _, batch in self._schedule.items():
+            if task_id in batch:
+                raise Exception("Double scheduling task: " + str(task_id))
+        self._schedule[start_offset].append(task_id)
+
+    def peek_next_time(self):
+        return min(self._schedule)
+
+    def get_next_batch(self):
+        next_time = self.peek_next_time()
+        res = self._schedule[next_time]
+        del self._schedule[next_time]
+        return res
+
+    def is_empty(self):
+        return len(self._schedule) == 0
+
+
+def simulate(register_engine, model_class, plan):
+    engine = SimulationEngine()
+    engine.register_model(model_class)
+    register_engine(engine)
+
+    directive_to_task_id = {}
+
+    for directive in plan.directives:
+        task_id, task = engine.defer(directive.type, directive.start_time, directive.args)
+        directive_to_task_id[hashable_directive(directive)] = task_id
+
+    while not engine.schedule.is_empty():
+        resume_time = engine.schedule.peek_next_time()
+        engine.elapsed_time = resume_time
+        batch_event_graph = EventGraph.empty()
+        for task_id in engine.schedule.get_next_batch():
+            task_status, event_graph = engine.step(task_id, engine.tasks[task_id])
+            batch_event_graph = EventGraph.concurrently(batch_event_graph, event_graph)
+        if type(batch_event_graph) != EventGraph.Empty:
+            if engine.events and engine.events[-1][0] == engine.elapsed_time:
+                engine.events[-1] = (engine.elapsed_time, EventGraph.sequentially(engine.events[-1][1], batch_event_graph))
+            else:
+                engine.events.append((engine.elapsed_time, batch_event_graph))
+        old_awaiting_conditions = list(engine.awaiting_conditions)
+        engine.awaiting_conditions.clear()
+        engine.current_task_frame = TaskFrame(engine.elapsed_time, history=engine.events)
+        while old_awaiting_conditions:
+            condition, task_id = old_awaiting_conditions.pop()
+            if condition():
+                engine.schedule.schedule(engine.elapsed_time, task_id)
+            else:
+                engine.awaiting_conditions.append((condition, task_id))
+    action_log_by_id = {}
+    for x in engine.action_log:
+        if x[0] not in action_log_by_id:
+            action_log_by_id[x[0]] = []
+        action_log_by_id[x[0]].append(x[1:])
+    return sorted(engine.spans, key=lambda x: (x[1], x[2])), list(engine.events), {
+        "directive_to_task_id": directive_to_task_id,
+        "action_log": action_log_by_id
+    }
+
+def simulate_incremental(register_engine, model_class, new_plan, old_plan, payload):
+    engine = SimulationEngine()
+    engine.register_model(model_class)
+    register_engine(engine)
+    unchanged_directives, deleted_directives, added_directives = diff(old_plan.directives, new_plan.directives)
+    directive_to_task_id = payload["directive_to_task_id"]
+    action_log = payload["action_log"]
+    for directive in unchanged_directives:
+        task_id = directive_to_task_id[hashable_directive(directive)]
+        task = task_replayer(engine, action_log[task_id])
+        engine.schedule.schedule(engine.elapsed_time + directive.start_time, task_id)
+        engine.task_start_times[task_id] = engine.elapsed_time + directive.start_time
+        engine.task_inputs[task_id] = (directive.type, directive.args)
+        engine.task_directives[task_id] = directive
+        engine.tasks[task_id] = task
+        result = task_id, task
+        task_id, task = result
+        directive_to_task_id[hashable_directive(directive)] = task_id
+
+    for directive in added_directives:
+        engine.defer(directive.type, directive.start_time, directive.args)
+
+    # COPY START
+    while not engine.schedule.is_empty():
+        resume_time = engine.schedule.peek_next_time()
+        engine.elapsed_time = resume_time
+        batch_event_graph = EventGraph.empty()
+        for task_id in engine.schedule.get_next_batch():
+            task_status, event_graph = engine.step(task_id, engine.tasks[task_id])
+            batch_event_graph = EventGraph.concurrently(batch_event_graph, event_graph)
+        if type(batch_event_graph) != EventGraph.Empty:
+            if engine.events and engine.events[-1][0] == engine.elapsed_time:
+                engine.events[-1] = (engine.elapsed_time, EventGraph.sequentially(engine.events[-1][1], batch_event_graph))
+            else:
+                engine.events.append((engine.elapsed_time, batch_event_graph))
+        old_awaiting_conditions = list(engine.awaiting_conditions)
+        engine.awaiting_conditions.clear()
+        engine.current_task_frame = TaskFrame(engine.elapsed_time, history=engine.events)
+        while old_awaiting_conditions:
+            condition, task_id = old_awaiting_conditions.pop()
+            if condition():
+                engine.schedule.schedule(engine.elapsed_time, task_id)
+            else:
+                engine.awaiting_conditions.append((condition, task_id))
+    # COPY END
+
+    return sorted(engine.spans, key=lambda x: (x[1], x[2])), list(engine.events), {
+        "action_log": [],
+        "directive_to_task_id": directive_to_task_id
+    }
+
+def task_replayer(engine: SimulationEngine, action_log):
+    for entry in action_log:
+        action = entry[0]
+        if action == "emit":
+            topic, value = entry[1:]
+            engine.current_task_frame.emit(topic, value)
+        elif action == "call":
+            child_task_id, child_directive_type, child_arguments = entry[1:]
+            # TODO use child_task_id
+            yield Call(child_directive_type, child_arguments)
+        elif action == "yield":
+            task_status, = entry[1:]
+            yield task_status
+        elif action == "spawn":
+            task_id, directive_type, arguments = entry[1:]
+            engine.spawn(directive_type, arguments)
+
+
+def make_generator(f, arguments):
+    if False:
+        yield
+    f(**arguments)
