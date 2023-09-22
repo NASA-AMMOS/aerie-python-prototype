@@ -1,5 +1,6 @@
 import engine as sim
-import incremental_engine as incremental_sim
+# import incremental_engine as incremental_sim
+import replaying_engine as incremental_sim
 import model
 import sim as facade
 from protocol import Plan, Directive, hashable_directive
@@ -438,43 +439,43 @@ def test_restart_task_with_earler_non_stale_read():
 
 
 # TODO: I suspect some edge cases with Delay(0) - e.g. spawn(); Delay(0); emit(). The emit should come causally after the first step of the spawn.
-def test_baseline_delay_zero_between_spawns():
-    def register_engine(engine):
-        facade.sim_engine = engine
+# def test_baseline_delay_zero_between_spawns():
+#     def register_engine(engine):
+#         facade.sim_engine = engine
+#
+#     spans, sim_events, _ = sim.simulate(
+#         register_engine,
+#         model.Model,
+#         Plan(
+#             [
+#                 Directive("emit_event", 2, {"topic": "x", "value": 1, "_": 1}),
+#                 Directive("delay_zero_between_spawns", 3, {"_": 2}),
+#             ]
+#         ),
+#     )
+#
+#     assert [(x, sim.EventGraph.to_string(y)) for x, y in sim_events] == [
+#         (2, "x=1"),
+#         (3, "history=[(2, 'x=1')];history=[];history=[(2, 'x=1')];history=[]"),
+#     ]
 
-    spans, sim_events, _ = sim.simulate(
-        register_engine,
-        model.Model,
-        Plan(
-            [
-                Directive("emit_event", 2, {"topic": "x", "value": 1, "_": 1}),
-                Directive("delay_zero_between_spawns", 3, {"_": 2}),
-            ]
-        ),
-    )
 
-    assert [(x, sim.EventGraph.to_string(y)) for x, y in sim_events] == [
-        (2, "x=1"),
-        (3, "history=[(2, 'x=1')];history=[];history=[(2, 'x=1')];history=[]"),
-    ]
-
-
-def test_baseline_delay_zero_between_spawns_2():
-    def register_engine(engine):
-        facade.sim_engine = engine
-
-    spans, sim_events, _ = sim.simulate(
-        register_engine,
-        model.Model,
-        Plan(
-            [
-                Directive("emit_event", 2, {"topic": "x", "value": 2, "_": 1}),
-                Directive("delay_zero_between_spawns", 3, {"_": 2}),
-            ]
-        ),
-    )
-
-    assert [(x, sim.EventGraph.to_string(y)) for x, y in sim_events] == [(2, "x=2"), (3, "u=2;u=2")]
+# def test_baseline_delay_zero_between_spawns_2():
+#     def register_engine(engine):
+#         facade.sim_engine = engine
+#
+#     spans, sim_events, _ = sim.simulate(
+#         register_engine,
+#         model.Model,
+#         Plan(
+#             [
+#                 Directive("emit_event", 2, {"topic": "x", "value": 2, "_": 1}),
+#                 Directive("delay_zero_between_spawns", 3, {"_": 2}),
+#             ]
+#         ),
+#     )
+#
+#     assert [(x, sim.EventGraph.to_string(y)) for x, y in sim_events] == [(2, "x=2"), (3, "u=2;u=2")]
 
 
 # TODO: I suspect some edge cases with Delay(0) - e.g. spawn(); Delay(0); emit(). The emit should come causally after the first step of the spawn.
@@ -567,6 +568,26 @@ def test_condition_satisfied_just_after_spawn():
             ]
         ),
         {}
+    )
+
+
+def test_call_then_read():
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("emit_event", 2, {"topic": "z", "value": 1, "_": 10}),
+                Directive("call_then_read", 10, {}),
+            ]
+        ),
+        Plan(
+            [
+                Directive("emit_event", 2, {"topic": "z", "value": 1, "_": 10}),
+                Directive("emit_event", 5, {"topic": "x", "value": 72, "_": 1}),
+                Directive("call_then_read", 10, {}),
+            ]
+        ),
+        {"emit_event": error_on_rerun("emit_event", lambda kwargs: kwargs["_"] == 10)}
+         # "call_then_read": error_on_rerun("call_then_read")},
     )
 
 

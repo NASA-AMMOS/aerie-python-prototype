@@ -150,9 +150,10 @@ def parent_of_parent_of_conditional_decomposition(model, _):
 
 
 def delay_zero_between_spawns(model, _):
-    spawn("conditional_decomposition", {"_": _})
+    spawn("conditional_decomposition", {"_": 1})
+    model.y.set(800)
     yield Delay(0)
-    spawn("conditional_decomposition", {"_": _})
+    spawn("conditional_decomposition", {"_": 2})
 
 
 def await_condition_set_by_child(model, _):
@@ -198,6 +199,13 @@ def await_y_greater_than(model, value):
     facade.sim_engine.current_task_frame.emit("u", 2)
 
 
+def call_then_read(model):
+    import sim as facade
+    facade.sim_engine.current_task_frame.emit("y", 7)
+    yield Call("reading_child", {})
+    facade.sim_engine.current_task_frame.emit("y", model.x.get())
+
+
 class Model:
     def __init__(self):
         self.x = Register("x", 55)
@@ -234,6 +242,7 @@ class Model:
             call_multiple,
             emit_and_delay,
             await_x_greater_than,
-            await_y_greater_than
+            await_y_greater_than,
+            call_then_read
         ]
         return {x.__name__: x for x in activity_types}

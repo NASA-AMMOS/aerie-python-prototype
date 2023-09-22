@@ -1,8 +1,11 @@
-# This is a simplified Aerie for prototyping purposes
+"""
+This implementation attempts to weave together older and newer event graphs.
+"""
 from collections import namedtuple
 import inspect
 from typing import List, Tuple
 
+from plan_diff import diff
 from protocol import (
     Completed,
     Delay,
@@ -38,7 +41,7 @@ class SimulationEngine:
         self.task_inputs = {}
         self.awaiting_conditions = []  # tuple (condition, task)
         self.awaiting_tasks = {}  # map from blocking task to blocked task
-        self.spans = []
+        self.spans = []  # tuple (directive, start time, end time)
 
     def register_model(self, cls):
         self.model = cls()
@@ -80,7 +83,6 @@ class SimulationEngine:
     def step(self, task, task_frame):
         restore = self.current_task_frame
         self.current_task_frame = task_frame
-        resuming_caller_task = None
         try:
             task_status = next(task)
         except StopIteration:
@@ -100,7 +102,6 @@ class SimulationEngine:
             task_frame.emit(make_finish_topic(task), "FINISHED")
             if task in self.awaiting_tasks:
                 self.schedule.schedule(self.elapsed_time, self.awaiting_tasks[task])
-                resuming_caller_task = self.awaiting_tasks[task]
                 del self.awaiting_tasks[task]
         elif type(task_status) == Call:
             child_task = make_task(self.model, task_status.child_task, task_status.args)
@@ -111,13 +112,7 @@ class SimulationEngine:
         else:
             raise ValueError("Unhandled task status: " + str(task_status))
         self.current_task_frame = restore
-        if resuming_caller_task is None:
-            return task_status, task_frame.collect()
-        else:
-            return task_status, EventGraph.sequentially(
-                task_frame.collect(),
-                EventGraph.Atom(Event(SPECIAL_READ_TOPIC, (make_finish_topic(task),), resuming_caller_task)),
-            )
+        return task_status, task_frame.collect()
 
 
 class TaskFrame:
@@ -178,12 +173,15 @@ def make_task(model, directive_type, arguments):
 class JobSchedule:
     def __init__(self):
         self._schedule = {}
+        self.last_time = None
 
     def schedule(self, start_offset, task):
-        if not start_offset in self._schedule:
+        if self.last_time is not None:
+            assert start_offset >= self.last_time, f"{start_offset} >= {self.last_time}"
+        if start_offset not in self._schedule:
             self._schedule[start_offset] = []
         for _, batch in self._schedule.items():
-            if task in batch and not EventGraph.is_event_graph(task):
+            if task in batch and not type(task) == list:
                 raise Exception("Double scheduling task: " + str(task))
         self._schedule[start_offset].append(task)
 
@@ -199,6 +197,7 @@ class JobSchedule:
         next_time = self.peek_next_time()
         res = self._schedule[next_time]
         del self._schedule[next_time]
+        self.last_time = next_time
         return res
 
     def is_empty(self):
@@ -206,15 +205,15 @@ class JobSchedule:
 
 
 def simulate(
-    register_engine,
-    model_class,
-    plan,
-    stop_time=None,
-    old_events=None,
-    deleted_tasks=None,
-    old_task_directives=None,
-    old_task_parent_spawned=None,
-    old_task_parent_called=None
+        register_engine,
+        model_class,
+        plan,
+        stop_time=None,
+        old_events=None,
+        deleted_tasks=None,
+        old_task_directives=None,
+        old_task_parent_spawned=None,
+        old_task_parent_called=None
 ):
     """
     Initialization of mutable keyword arguments, because python is... python
@@ -235,48 +234,68 @@ def simulate(
     """
     Prepare for simulation
     """
-    old_task_parent = dict_union(old_task_parent_spawned, old_task_parent_called)  # useful when you don't care if it was spawned or called
+    old_task_parent = dict_union(old_task_parent_spawned,
+                                 old_task_parent_called)  # useful when you don't care if it was spawned or called
     engine = SimulationEngine()  # keeps track of what's next to do
     engine.register_model(model_class)  # creates a new instance of the model class
-    register_engine(engine)  # this is a hook for the called to be able to hold a reference to the engine. Called here to give a chance to override activities for testing.
+    register_engine(
+        engine)  # this is a hook for the called to be able to hold a reference to the engine. Called here to give a chance to override activities for testing.
     for directive in plan.directives:  # Add all plan directives to the schedule
         engine.defer(directive.type, directive.start_time, directive.args)
-    for start_offset, event_graph in all_events_from_previous_sim:  # Add READ events from the previous sim to the schedule, so we remember to check whether they're stale
+    reads_grouped_by_start_offset = []
+    for start_offset, event_graph in all_events_from_previous_sim:
+        if not reads_grouped_by_start_offset or start_offset != reads_grouped_by_start_offset[-1][0]:
+            reads_grouped_by_start_offset.append((start_offset, []))
+        reads_grouped_by_start_offset[-1][1].append(EventGraph.filter(event_graph, [SPECIAL_READ_TOPIC]))
+    for start_offset, event_graphs in reads_grouped_by_start_offset:  # Add READ events from the previous sim to the schedule, so we remember to check whether they're stale
         if engine.task_start_times and start_offset <= min(engine.task_start_times.values()):
             continue
-        reads = EventGraph.filter(event_graph, [SPECIAL_READ_TOPIC])
-        if not EventGraph.is_empty(reads):
-            engine.schedule.schedule(start_offset, reads)
+        if any(not EventGraph.is_empty(x) for x in event_graphs):
+            engine.schedule.schedule(start_offset, event_graphs)
     restarted_tasks = {}  # Every restarted task has an old task (key) and a corresponding new task (value)
     stale_topics = {}  # map of topic to time at which it became stale
     restarted_tasks_not_yet_grafted = set()  # to-do list of tasks that have been restarted, but not stepped yet. If they are newly spawned, they will need to be grafted
     new_task_to_events = {}  # tracks events emitted by restarted tasks.
-    future_events_from_previous_sim = list(old_events)  # tracks events from the previous simulation that have not yet been added to engine.events
+    future_events_from_previous_sim = list(
+        old_events)  # tracks events from the previous simulation that have not yet been added to engine.events
+    saved_caller_events = {}  # Track events emitted by callers when restarting their children
     while not engine.schedule.is_empty():
         resume_time = engine.schedule.peek_next_time()
+        assert resume_time >= engine.elapsed_time, "f{resume_time} >= {engine.elapsed_time}"
         if stop_time is not None and resume_time >= stop_time:
             break
         engine.elapsed_time = resume_time
         while future_events_from_previous_sim and future_events_from_previous_sim[0][0] < resume_time:
             next_commit = future_events_from_previous_sim.pop(0)
-            engine.events.append((next_commit[0], EventGraph.filter_p(next_commit[1], lambda evt: evt.progeny not in set(restarted_tasks).union(deleted_tasks))))
+            engine.events.append((next_commit[0], EventGraph.filter_p(next_commit[1],
+                                                                      lambda evt: evt.progeny not in set(
+                                                                          restarted_tasks).union(deleted_tasks))))
         batch = engine.schedule.get_next_batch()
-        batch_reads = [x for x in batch if EventGraph.is_event_graph(x)]
-        batch_tasks = [x for x in batch if not EventGraph.is_event_graph(x)]
+        batch_reads = [x for x in batch if type(x) == list]
+        batch_tasks = [x for x in batch if not type(x) == list]
 
         # Iterate to a fixed point, marking topics stale as more tasks are added to tasks_to_restart
         prev_tasks_to_restart = None
         tasks_to_restart = set()
         while tasks_to_restart != prev_tasks_to_restart:
             prev_tasks_to_restart = set(tasks_to_restart)
-            affected_topics = get_topics_affected_by_tasks(all_events_from_previous_sim, set(restarted_tasks).union(deleted_tasks).union(tasks_to_restart))
+            affected_topics = get_topics_affected_by_tasks(all_events_from_previous_sim,
+                                                           set(restarted_tasks).union(deleted_tasks).union(
+                                                               tasks_to_restart))
             stale_topics = dict_union(stale_topics, affected_topics, lambda a, b: min(a, b))
-            for read_graph in batch_reads:
-                for read in EventGraph.to_set(read_graph):
-                    if read.progeny in restarted_tasks or read.progeny in deleted_tasks:
-                        continue
-                    if set(read.value).intersection(set(topic for topic, start_offset in stale_topics.items() if start_offset <= engine.elapsed_time)):
-                        tasks_to_restart.add(read.progeny)
+            if not len(batch_reads) <= 1:
+                print()
+            if batch_reads:
+                for i, read_graph in enumerate(batch_reads[0]):
+                    for read in EventGraph.to_set(read_graph):
+                        if read.progeny in restarted_tasks or read.progeny in deleted_tasks:
+                            continue
+                        if set(read.value).intersection(set(topic for topic, start_offset in stale_topics.items() if
+                                                            start_offset <= engine.elapsed_time)):
+                            tasks_to_restart.add(read.progeny)
+                    if batch_reads[0][i + 1:]:
+                        engine.schedule.schedule(engine.elapsed_time, batch_reads[0][i + 1:])
+                        break
         """
         Remove child tasks from tasks_to_restart when their parent is also in tasks_to_restart.
         Add those child tasks to deleted_tasks
@@ -287,22 +306,39 @@ def simulate(
             Restart the tasks. At the end, all tasks have been stepped up to a time prior to engine.elapsed time,
             and scheduled to resume at engine.elapsed time.
             """
-            newly_restarted_tasks = restart_stale_tasks(register_engine, model_class, engine, tasks_to_restart, old_task_directives,
-                                                        old_task_parent_called, old_task_parent_spawned, list(engine.events),
+            newly_restarted_tasks = restart_stale_tasks(register_engine, model_class, engine, tasks_to_restart,
+                                                        old_task_directives,
+                                                        old_task_parent_called, old_task_parent_spawned,
+                                                        list(engine.events),
                                                         all_events_from_previous_sim)
             # At this point, the restarted tasks have been scheduled to execute in the next time step
             restarted_tasks_not_yet_grafted.update(newly_restarted_tasks)
             restarted_tasks.update(newly_restarted_tasks)
 
+            for restarted_task in newly_restarted_tasks:
+                if restarted_task in old_task_parent_called:
+                    caller_task = old_task_parent_called[restarted_task]
+                    finish_topic = make_finish_topic(restarted_task)
+                    caller_history = filter_history_keep(
+                        get_history_after(all_events_from_previous_sim, topic_equals(finish_topic)), {caller_task})
+                    call_time = caller_history[0][0]
+                    caller_history = [(t - call_time, y) for t, y in caller_history]
+                    caller_history = [x for x in caller_history if not EventGraph.is_empty(x[1])]
+                    saved_caller_events[caller_task] = caller_history
+                    future_events_from_previous_sim = filter_history_discard_after_spawn(
+                        future_events_from_previous_sim, restarted_task, {caller_task})
             for task in batch_tasks:
                 engine.schedule.schedule(engine.elapsed_time, task)
         else:  # If there are no tasks to restart
+            if engine.elapsed_time == 3:
+                print()
             batch_event_graph = EventGraph.empty()
             for task in batch_tasks:
                 if task in [restarted_tasks[x] for x in restarted_tasks_not_yet_grafted]:
                     old_task = [x for x in restarted_tasks_not_yet_grafted if restarted_tasks[x] == task][0]
                     if old_task in old_task_parent and engine.task_start_times[task] == engine.elapsed_time:
-                        history = engine.events + [find_spawn_event(all_events_from_previous_sim, old_task)[-1]]
+                        history = engine.events + [x for x in find_spawn_event(all_events_from_previous_sim, old_task)
+                                                   if x[0] == engine.elapsed_time]
                     else:
                         history = engine.events
                 else:
@@ -314,24 +350,32 @@ def simulate(
                     """
                     Move future reads of the ("FINISH", restarted_task) topic to now.
                     """
-                    for t, batch in list(engine.schedule._schedule.items()):
-                        for eg in batch:
-                            if EventGraph.is_event_graph(eg):
-                                caller = EventGraph.to_set(
-                                    EventGraph.filter_p(
-                                        eg,
-                                        lambda evt: (evt.topic == "READ" and
-                                                     type(evt.value[0]) == tuple and
-                                                     len(evt.value[0]) == 2 and
-                                                     evt.value[0][0] == "FINISH" and
-                                                     evt.value[0][1] in restarted_tasks and
-                                                     restarted_tasks[evt.value[0][1]] == task)),
-                                    lambda evt: evt.progeny)
-                                if caller:
-                                    caller, = caller  # unpack a single-item set. The comma is crucial.
-                                    engine.schedule.unschedule(EventGraph.atom(Event("READ", (make_finish_topic(task),), caller)))
-                                    engine.schedule.schedule(engine.elapsed_time, EventGraph.atom(Event("READ", (make_finish_topic(task),), caller)))
-                if task in [restarted_tasks[x] for x in restarted_tasks_not_yet_grafted] and engine.task_start_times[task] == engine.elapsed_time:
+                    if task in restarted_tasks.values():
+                        old_task = [x for x, y in restarted_tasks.items() if y == task][0]
+                        if old_task in old_task_parent_called:
+                            events_to_add = [(t + engine.elapsed_time, y) for t, y in
+                                             saved_caller_events[old_task_parent_called[old_task]]]
+                            future_events_from_previous_sim = overlay_histories(future_events_from_previous_sim,
+                                                                                events_to_add)
+                    # for t, batch in list(engine.schedule._schedule.items()):
+                    #     for eg in batch:
+                    #         if EventGraph.is_event_graph(eg):
+                    #             caller = EventGraph.to_set(
+                    #                 EventGraph.filter_p(
+                    #                     eg,
+                    #                     lambda evt: (evt.topic == "READ" and
+                    #                                  type(evt.value[0]) == tuple and
+                    #                                  len(evt.value[0]) == 2 and
+                    #                                  evt.value[0][0] == "FINISH" and
+                    #                                  evt.value[0][1] in restarted_tasks and
+                    #                                  restarted_tasks[evt.value[0][1]] == task)),
+                    #                 lambda evt: evt.progeny)
+                    #             if caller:
+                    #                 caller, = caller  # unpack a single-item set. The comma is crucial.
+                    #                 engine.schedule.unschedule(EventGraph.atom(Event("READ", (make_finish_topic(task),), caller)))
+                    #                 engine.schedule.schedule(engine.elapsed_time, EventGraph.atom(Event("READ", (make_finish_topic(task),), caller)))
+                if task in [restarted_tasks[x] for x in restarted_tasks_not_yet_grafted] and engine.task_start_times[
+                    task] == engine.elapsed_time:
                     new_task_to_events[task] = event_graph
                 else:
                     batch_event_graph = EventGraph.concurrently(batch_event_graph, event_graph)
@@ -349,7 +393,10 @@ def simulate(
             """
             previous_eg = EventGraph.empty()
             while future_events_from_previous_sim and future_events_from_previous_sim[0][0] == resume_time:
-                previous_eg = EventGraph.sequentially(previous_eg, EventGraph.filter_p(future_events_from_previous_sim.pop(0)[1], lambda evt: evt.progeny not in set(restarted_tasks).union(deleted_tasks)))
+                previous_eg = EventGraph.sequentially(previous_eg,
+                                                      EventGraph.filter_p(future_events_from_previous_sim.pop(0)[1],
+                                                                          lambda evt: evt.progeny not in set(
+                                                                              restarted_tasks).union(deleted_tasks)))
             batch_event_graph = EventGraph.concurrently(batch_event_graph, previous_eg)
             if future_events_from_previous_sim and future_events_from_previous_sim[0][0] == resume_time:
                 raise ValueError("Duplicate resume time in old_events:", resume_time)
@@ -371,7 +418,7 @@ def simulate(
 
             """
             Identify future stale reads, and remove all events from stale readers from the future, since we expect them to be restarted.
-            
+
             TODO: Does this even make sense?
             """
             newly_stale_readers = set()
@@ -379,8 +426,8 @@ def simulate(
                 filtered = EventGraph.filter_p(
                     event_graph,
                     lambda evt: evt.topic == SPECIAL_READ_TOPIC
-                    and evt.progeny not in deleted_tasks
-                    and set(evt.value).intersection(newly_invalidated_topics),
+                                and evt.progeny not in deleted_tasks
+                                and set(evt.value).intersection(newly_invalidated_topics),
                 )
                 newly_stale_readers.update(EventGraph.to_set(filtered, lambda evt: evt.progeny))
             if newly_stale_readers:
@@ -391,7 +438,8 @@ def simulate(
                         start_offset,
                         EventGraph.filter_p(event_graph, lambda evt: evt.progeny not in newly_stale_readers),
                     )
-                future_events_from_previous_sim = [x for x in future_events_from_previous_sim if not EventGraph.is_empty(x[1])]
+                future_events_from_previous_sim = [x for x in future_events_from_previous_sim if
+                                                   not EventGraph.is_empty(x[1])]
                 # TODO What about events emitted by children?
 
             """
@@ -427,10 +475,32 @@ def simulate(
         "task_parent_spawned": {
             child: parent for parent, children in engine.task_children_spawned.items() for child in children
         },
-        "deleted_tasks": deleted_tasks.union(restarted_tasks),
+        "deleted_tasks": deleted_tasks.union(restarted_tasks).union(saved_caller_events),
+        # saved_caller_events helps delete the old spans
     }
     filtered_spans = remove_task_from_spans(spans)
-    return filtered_spans, collapse_simultaneous(without_special_events(engine.events), EventGraph.sequentially), payload
+
+    for task in set(saved_caller_events).difference(restarted_tasks):
+        filtered_spans.append(
+            (old_task_directives[task], old_task_directives[task].start_time, find_end_time(engine.events, task)))
+
+    return filtered_spans, collapse_simultaneous(
+        without_special_events(filter_history_discard(engine.events, deleted_tasks)), EventGraph.sequentially), payload
+
+
+def topic_equals(x):
+    def _(evt):
+        return evt.topic == x
+
+    return _
+
+
+def find_end_time(history, task):
+    for t, eg in history:
+        filtered = EventGraph.filter(eg, (make_finish_topic(task),))
+        if not EventGraph.is_empty(filtered):
+            return t
+    raise ValueError("No end time found for " + str(task) + " in " + str(history))
 
 
 def remove_children_whose_parents_are_present(tasks_to_restart, task_parent, deleted_tasks):
@@ -447,9 +517,51 @@ def remove_children_whose_parents_are_present(tasks_to_restart, task_parent, del
     return tasks_to_restart
 
 
+def overlay_histories(a, b):
+    if not a:
+        return b
+    if not b:
+        return a
+    res = []
+    iter_a = iter(a)
+    iter_b = iter(b)
+
+    next_a = next(iter_a)
+    next_b = next(iter_b)
+    while True:
+        if next_a[0] < next_b[0]:
+            res.append(next_a)
+            try:
+                next_a = next(iter_a)
+            except StopIteration:
+                res.extend(iter_b)
+                return res
+        elif next_a[0] > next_b[0]:
+            res.append(next_b)
+            try:
+                next_b = next(iter_b)
+            except StopIteration:
+                res.extend(iter_a)
+                return res
+        else:
+            res.append((next_a[0], EventGraph.concurrently(next_a[1], next_b[1])))
+            try:
+                next_a = next(iter_a)
+            except StopIteration:
+                res.extend(iter_b)
+                return res
+            try:
+                next_b = next(iter_b)
+            except StopIteration:
+                res.extend(iter_a)
+                return res
+
+
 def extend_history(history, elapsed_time, events):
     if history and history[-1][0] > elapsed_time:
-        raise ValueError("Time in history must be monotonically increasing: " + str(history) + ", " + str(elapsed_time) + ", " + str(events))
+        raise ValueError(
+            "Time in history must be monotonically increasing: " + str(history) + ", " + str(elapsed_time) + ", " + str(
+                events))
     if EventGraph.is_empty(events):
         return
     # if history and history[-1][0] == elapsed_time:
@@ -464,6 +576,7 @@ def extend_history(history, elapsed_time, events):
 def raise_error(message):
     def f(a, b):
         raise ValueError(message)
+
     return f
 
 
@@ -484,6 +597,7 @@ def dict_union(a, b, on_conflict=raise_error("No conflict resolution method was 
             res[k] = v
     return res
 
+
 def get_topics_affected_by_tasks(history, tasks):
     """
     Finds all topics to which the given tasks have ever emitted events.
@@ -503,7 +617,7 @@ def get_topics_affected_by_tasks(history, tasks):
     return res
 
 
-def filter_history(history, deleted_tasks):
+def filter_history_discard(history, deleted_tasks):
     res = []
     for x, eg in history:
         filtered = EventGraph.filter_p(eg, lambda evt: evt.progeny not in deleted_tasks)
@@ -512,8 +626,50 @@ def filter_history(history, deleted_tasks):
     return res
 
 
+def filter_history_discard_after_spawn(history, spawned_task, deleted_tasks):
+    res = []
+    is_after = False
+    for x, eg in history:
+        if is_after:
+            filtered = EventGraph.filter_p(eg, lambda evt: evt.progeny not in deleted_tasks)
+            if not EventGraph.is_empty(filtered):
+                res.append((x, filtered))
+        else:
+            filtered = EventGraph.filter_p(eg,
+                                           lambda evt: evt.topic == SPECIAL_SPAWN_TOPIC and evt.value == spawned_task)
+            if not EventGraph.is_empty(filtered):
+                dominated, not_dominated, _ = find_all_dominated_by(eg, spawned_task)
+                res.append((x, not_dominated))
+                is_after = True
+    return res
+
+
+def filter_history_keep(history, tasks_to_keep):
+    res = []
+    for x, eg in history:
+        filtered = EventGraph.filter_p(eg, lambda evt: evt.progeny in tasks_to_keep)
+        if not EventGraph.is_empty(filtered):
+            res.append((x, filtered))
+    return res
+
+
+def get_history_after(history, predicate):
+    res = []
+    is_after = False
+    for x, eg in history:
+        if is_after:
+            res.append((x, eg))
+        else:
+            filtered = EventGraph.filter_p(eg, predicate)
+            if not EventGraph.is_empty(filtered):
+                is_after = True
+                res.append((x, get_suffix(eg, predicate)))
+    return res
+
+
 def restart_stale_tasks(
-    register_engine, model_class, engine, tasks_to_restart, old_task_directives, old_task_parent_called, old_task_parent_spawned, current_events, all_old_events
+        register_engine, model_class, engine, tasks_to_restart, old_task_directives, old_task_parent_called,
+        old_task_parent_spawned, current_events, all_old_events
 ):
     old_task_to_new_task = {}
 
@@ -524,8 +680,9 @@ def restart_stale_tasks(
         else:
             spawn_event_prefix = (old_task_directives[reader_task].start_time, EventGraph.empty())
         task, status = step_up_single_task(register_engine, model_class, old_task_directives[reader_task].type,
-                            old_task_directives[reader_task].start_time, old_task_directives[reader_task].args,
-                            engine.elapsed_time, all_old_events, spawn_event_prefix)
+                                           old_task_directives[reader_task].start_time,
+                                           old_task_directives[reader_task].args,
+                                           engine.elapsed_time, all_old_events, spawn_event_prefix)
         register_engine(engine)
         engine.task_start_times[task] = old_task_directives[reader_task].start_time
         engine.task_directives[task] = old_task_directives[reader_task]
@@ -543,13 +700,15 @@ def restart_stale_tasks(
     return old_task_to_new_task
 
 
-def step_up_single_task(register_engine, model_class, directive_type, start_offset, arguments, stop_time, history, spawn_prefix):
+def step_up_single_task(register_engine, model_class, directive_type, start_offset, arguments, stop_time, history,
+                        spawn_prefix):
     """
     Steps up the given task using old events, ignoring spawns and calls, up to the given time
     """
     engine = SimulationEngine()  # keeps track of what's next to do
     engine.register_model(model_class)  # creates a new instance of the model class
-    register_engine(engine)  # this is a hook for the called to be able to hold a reference to the engine. Called here to give a chance to override activities for testing.
+    register_engine(
+        engine)  # this is a hook for the called to be able to hold a reference to the engine. Called here to give a chance to override activities for testing.
     task = engine.defer(directive_type, start_offset, arguments)
     elapsed_time = start_offset
     future_history = list(history)
@@ -600,12 +759,14 @@ def step_up_single_task(register_engine, model_class, directive_type, start_offs
             raise ValueError("Unhandled task status: " + str(status))
     return task, status
 
+
 def graft(history, new_events, old_task, new_task):
     res = []
     any_success = False
     for x, eg in history:
         dominated, not_dominated, _ = find_all_dominated_by(eg, old_task)
-        new_eg, success = graft_helper(not_dominated, EventGraph.concurrently(dominated, new_events), old_task, new_task)
+        new_eg, success = graft_helper(not_dominated, EventGraph.concurrently(dominated, new_events), old_task,
+                                       new_task)
         if success:
             res.append((x, new_eg))
             any_success = True
@@ -620,7 +781,9 @@ def graft_helper(event_graph, new_events, old_task, new_task, suffix=EventGraph.
     if type(event_graph) == EventGraph.Atom:
         evt = event_graph.value
         if evt.topic == SPECIAL_SPAWN_TOPIC and evt.value == old_task:
-            return EventGraph.sequentially(EventGraph.atom(Event(SPECIAL_SPAWN_TOPIC, new_task, event_graph.value.progeny)), EventGraph.concurrently(new_events, suffix)), True
+            return EventGraph.sequentially(
+                EventGraph.atom(Event(SPECIAL_SPAWN_TOPIC, new_task, event_graph.value.progeny)),
+                EventGraph.concurrently(new_events, suffix)), True
         else:
             return event_graph, False
     if type(event_graph) == EventGraph.Sequentially:
@@ -659,9 +822,11 @@ def find_all_dominated_by(event_graph, old_task):
         left_dominated, left_not_dominated, left_found = find_all_dominated_by(event_graph.left, old_task)
         right_dominated, right_not_dominated, right_found = find_all_dominated_by(event_graph.right, old_task)
         if left_found:
-            return left_dominated, EventGraph.concurrently(left_not_dominated, event_graph.right), True  # TODO: Untested
+            return left_dominated, EventGraph.concurrently(left_not_dominated,
+                                                           event_graph.right), True  # TODO: Untested
         if right_found:
-            return right_dominated, EventGraph.concurrently(event_graph.left, right_not_dominated), True  # TODO: Untested
+            return right_dominated, EventGraph.concurrently(event_graph.left,
+                                                            right_not_dominated), True  # TODO: Untested
         return EventGraph.empty(), event_graph, False
     raise ValueError("Not an event_graph: " + str(event_graph))
 
@@ -711,6 +876,23 @@ def get_prefix(event_graph, f):
     raise ValueError("Not an event_graph: " + str(event_graph))
 
 
+def get_suffix(event_graph, f):
+    return reverse_event_graph(get_prefix(reverse_event_graph(event_graph), f))
+
+
+def reverse_event_graph(event_graph):
+    if type(event_graph) == EventGraph.Empty:
+        return event_graph
+    if type(event_graph) == EventGraph.Atom:
+        return event_graph
+    if type(event_graph) == EventGraph.Sequentially:
+        return EventGraph.sequentially(reverse_event_graph(event_graph.suffix),
+                                       reverse_event_graph(event_graph.prefix))  # swapped
+    if type(event_graph) == EventGraph.Concurrently:  # TODO: Untested
+        return EventGraph.concurrently(reverse_event_graph(event_graph.left), reverse_event_graph(event_graph.right))
+
+    raise ValueError("Not an event_graph: " + str(event_graph))
+
 
 def remove_task_from_spans(spans):
     filtered_spans = []
@@ -728,7 +910,7 @@ def without_special_events(events):
         filtered = EventGraph.filter_p(
             y,
             lambda evt: evt.topic not in (SPECIAL_READ_TOPIC, SPECIAL_SPAWN_TOPIC)
-            and not (type(evt.topic) == tuple and evt.topic[0] == "FINISH"),
+                        and not (type(evt.topic) == tuple and evt.topic[0] == "FINISH"),
         )
         if not EventGraph.is_empty(filtered):
             non_read_events.append((x, filtered))
@@ -820,27 +1002,6 @@ def collapse_simultaneous(history, combiner):
     return [tuple(x) for x in res]
 
 
-def diff(old_directives, new_directives):
-    old_directives = list(old_directives)
-    new_directives = list(new_directives)
-    unchanged_directives = []
-
-    any_matched = True
-    while any_matched:
-        # TODO use a more efficient diff algorithm
-        any_matched = False
-        for old in old_directives:
-            for new in new_directives:
-                if old == new:
-                    unchanged_directives.append(old)
-                    new_directives.remove(new)
-                    old_directives.remove(old)
-                    any_matched = True
-    deleted_directives = old_directives
-    added_directives = new_directives
-    return unchanged_directives, deleted_directives, added_directives
-
-
 def make_generator(f, arguments):
     return OneShotTask(f, arguments)
 
@@ -849,6 +1010,7 @@ class OneShotTask:
     """
     This class exists just so that __repr__ returns a useful string, and not just `make_generator`.
     """
+
     def __init__(self, f, arguments):
         self.f = f
         self.arguments = arguments
@@ -865,4 +1027,4 @@ class OneShotTask:
         return Completed()
 
     def __repr__(self):
-        return repr(self.f)
+        return f"{self.f.__name__}({id(self)})"
