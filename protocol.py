@@ -29,5 +29,8 @@ def untuple_args(tupled_args):
 def hashable_directive(directive):
     return Directive(directive.type, directive.start_time, tuple_args(directive.args))
 
+def hashable_directive_without_time(directive):
+    return (directive.type, tuple_args(directive.args))
+
 def restore_directive(hashable_directive):
     return Directive(hashable_directive.type, hashable_directive.start_time, untuple_args(hashable_directive.args))

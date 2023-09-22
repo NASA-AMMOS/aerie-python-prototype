@@ -193,6 +193,27 @@ def test_with_new_reads_of_old_topics():
         {"my_activity": error_on_rerun("my_activity", lambda kwargs: kwargs["param1"] == 4)},
     )
 
+def test_branching_rbt():
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("emit_event", 1, {"topic": "x", "value": 1, "_": 1}),
+                Directive("read_emit_three_times", 5,  # 5, 10, 15
+                          {"read_topic": "x", "emit_topic": "history", "delay": 5, "_": 1}),
+                Directive("emit_event", 11, {"topic": "x", "value": 2, "_": 1}),
+                Directive("read_emit_three_times", 7,  # 7, 12, 17
+                          {"read_topic": "x", "emit_topic": "history", "delay": 5, "_": 1}),
+            ]
+        ),
+        Plan(
+            [
+                Directive("emit_event", 10, {"topic": "x", "value": 1, "_": 1}),
+                Directive("read_topic", 15, {"topic": "x", "_": 1}),
+                Directive("read_topic", 16, {"topic": "x", "_": 2}),
+            ]
+        ),
+        {"my_activity": error_on_rerun("my_activity", lambda kwargs: kwargs["param1"] == 4)},
+    )
 
 def test_with_reads_made_stale_dynamically():
     incremental_sim_test_case(
@@ -407,6 +428,30 @@ def test_spawned_activity():
         {
             "emit_event": error_on_rerun("emit_event", lambda kwargs: kwargs["_"] == 10),
             "spawns_reading_child": error_on_rerun("spawns_reading_child"),
+        },
+    )
+
+def test_spawned_activity_no_changes():
+    """
+    Identical plan, should not require rerunning child
+    """
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("emit_event", 2, {"topic": "z", "value": 1, "_": 10}),
+                Directive("spawns_reading_child", 10, {}),
+            ]
+        ),
+        Plan(
+            [
+                Directive("emit_event", 2, {"topic": "z", "value": 1, "_": 10}),
+                Directive("spawns_reading_child", 10, {}),
+            ]
+        ),
+        {
+            "emit_event": error_on_rerun("emit_event", lambda kwargs: kwargs["_"] == 10),
+            "spawns_reading_child": error_on_rerun("spawns_reading_child"),
+            "reading_child": error_on_rerun("reading_child"),
         },
     )
 

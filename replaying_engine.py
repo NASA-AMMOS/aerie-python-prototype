@@ -3,7 +3,7 @@ from collections import namedtuple
 import inspect
 
 from plan_diff import diff
-from protocol import Completed, Delay, AwaitCondition, Call, Directive, Plan, hashable_directive
+from protocol import Completed, Delay, AwaitCondition, Call, Directive, hashable_directive_without_time, tuple_args
 from event_graph import EventGraph
 
 Event = namedtuple("Event", "topic value")
@@ -70,9 +70,6 @@ class SimulationEngine:
             task_status = next(task)
         except StopIteration:
             task_status = Completed()
-        return self.handle_task_status(task_id, task_status)
-
-    def handle_task_status(self, task_id, task_status):
         if type(task_status) == Delay:
             self.schedule.schedule(self.elapsed_time + task_status.duration, task_id)
         elif type(task_status) == AwaitCondition:
@@ -192,7 +189,7 @@ def simulate(register_engine, model_class, plan):
 
     for directive in plan.directives:
         task_id, task = engine.defer(directive.type, directive.start_time, directive.args)
-        directive_to_task_id[hashable_directive(directive)] = task_id
+        directive_to_task_id[hashable_directive_without_time(directive)] = task_id
 
     while not engine.schedule.is_empty():
         resume_time = engine.schedule.peek_next_time()
@@ -215,15 +212,78 @@ def simulate(register_engine, model_class, plan):
                 engine.schedule.schedule(engine.elapsed_time, task_id)
             else:
                 engine.awaiting_conditions.append((condition, task_id))
+
     action_log_by_id = {}
     for x in engine.action_log:
         if x[0] not in action_log_by_id:
             action_log_by_id[x[0]] = []
         action_log_by_id[x[0]].append(x[1:])
+
+    # action log structure:
+    # key: hashable(directive name, args)
+    # value: a read-branching tree. It is one of:
+    # - NonRead(payload, next)
+    # - Read(topic, Map[Value, read-branching tree])
+
+    action_log = {}
+    for task_id, actions in action_log_by_id.items():
+        directive = engine.task_directives[task_id]
+        key = (directive.type, tuple_args(directive.args))
+        if key in action_log:
+            action_log[key] = extend(action_log[key], actions)
+        else:
+            action_log[key] = make_rbt(actions)
+
+
     return sorted(engine.spans, key=lambda x: (x[1], x[2])), list(engine.events), {
         "directive_to_task_id": directive_to_task_id,
         "action_log": action_log_by_id
     }
+
+
+RBT_Empty = namedtuple("RBT_Empty", "")
+RBT_NonRead = namedtuple("RBT_NonRead", "payload rest")
+RBT_Read = namedtuple("RBT_Read", "topics branches")
+
+
+def make_rbt(actions):
+    if not actions:
+        return RBT_Empty()
+    first, rest = actions[0], actions[1:]
+    action, action_args = first[0], first[1:]
+    if action == "read":
+        topics, res = action_args
+        return RBT_Read(topics, ((res, make_rbt(rest)),))
+    else:
+        return RBT_NonRead(first, make_rbt(rest))
+
+
+def extend(rbt, actions):
+    if not actions:
+        return rbt
+    first, rest = actions[0], actions[1:]
+    action, action_args = first[0], first[1:]
+    if action == "read":
+        assert type(rbt) == RBT_Read
+        topics, res = action_args
+        res = tuple(res)
+        assert rbt.topics == topics
+        new_branches = list()
+        found_match = False
+        for old_res, old_rbt in rbt.branches:
+            old_res = tuple(old_res)
+            if old_res == res:
+                found_match = True
+                new_branches.append((old_res, extend(old_rbt, rest)))
+            else:
+                new_branches.append((old_res, old_rbt))
+        if not found_match:
+            new_branches.append((res, make_rbt(rest)))
+        return RBT_Read(topics, tuple(new_branches))
+    else:
+        assert type(rbt) == RBT_NonRead
+        return RBT_NonRead(first, extend(rbt.rest, rest))
+
 
 def simulate_incremental(register_engine, model_class, new_plan, old_plan, payload):
     engine = SimulationEngine()
@@ -275,8 +335,9 @@ class Imitator:
         self.register_engine = register_engine
 
     def imitate(self, engine, directive):
-        task_id = self.directive_to_task_id[hashable_directive(directive)]
-        task = task_replayer(engine, task_id, directive, self.action_log[task_id], self, self.register_engine)
+        old_task_id = self.directive_to_task_id[hashable_directive_without_time(directive)]
+        task_id = fresh_task_id(old_task_id.label)
+        task = task_replayer(engine, task_id, directive, self.action_log[old_task_id], self, self.register_engine)
         engine.schedule.schedule(engine.elapsed_time + directive.start_time, task_id)
         engine.task_start_times[task_id] = engine.elapsed_time + directive.start_time
         engine.task_inputs[task_id] = (directive.type, directive.args)
