@@ -1,4 +1,14 @@
-# This is a simplified Aerie for prototyping purposes
+"""
+This approach records the actions taken by each task, and replays them as appropriate.
+
+TO-DO:
+- daemon tasks
+- anonymous tasks
+- sim config
+- try not to re-run called tasks
+- be able to find un-stale reads (i.e. take into account the cell function, not just the history)
+- perhaps avoid re-running tasks within the same simulation (e.g. if same directive repeated)
+"""
 from collections import namedtuple
 import inspect
 
@@ -383,7 +393,7 @@ def task_replayer(engine: SimulationEngine, task_id, directive, action_log, imit
                 engine.current_task_frame.emit(topic, value)
             elif action == "yield":
                 task_status, = action_args
-                yield task_status
+                yield task_status  # TODO if task status is call - make sure the engine tries to look up known tasks before running
             elif action == "spawn":
                 directive_type, arguments = action_args
                 imitator.imitate_spawn(engine, directive_type, arguments)
