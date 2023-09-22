@@ -237,7 +237,7 @@ def simulate(register_engine, model_class, plan):
 
     return sorted(engine.spans, key=lambda x: (x[1], x[2])), list(engine.events), {
         "directive_to_task_id": directive_to_task_id,
-        "action_log": action_log_by_id
+        "action_log": action_log
     }
 
 
@@ -337,7 +337,7 @@ class Imitator:
     def imitate(self, engine, directive):
         old_task_id = self.directive_to_task_id[hashable_directive_without_time(directive)]
         task_id = fresh_task_id(old_task_id.label)
-        task = task_replayer(engine, task_id, directive, self.action_log[old_task_id], self, self.register_engine)
+        task = task_replayer(engine, task_id, directive, self.action_log[hashable_directive_without_time(directive)], self, self.register_engine)
         engine.schedule.schedule(engine.elapsed_time + directive.start_time, task_id)
         engine.task_start_times[task_id] = engine.elapsed_time + directive.start_time
         engine.task_inputs[task_id] = (directive.type, directive.args)
@@ -351,27 +351,36 @@ class Imitator:
 
 def task_replayer(engine: SimulationEngine, task_id, directive, action_log, imitator, register_engine):
     processed_reads = []
-    for entry in action_log:
-        action = entry[0]
-        action_args = entry[1:]
-        if action == "emit":
-            topic, value = action_args
-            engine.current_task_frame.emit(topic, value)
-        elif action == "yield":
-            task_status, = action_args
-            yield task_status
-        elif action == "spawn":
-            directive_type, arguments = action_args
-            engine.spawn(directive_type, arguments)
-        elif action == "read":
-            topics, old_res = action_args
+    while type(action_log) != RBT_Empty:
+        if type(action_log) == RBT_NonRead:
+            entry = action_log.payload
+            action = entry[0]
+            action_args = entry[1:]
+            if action == "emit":
+                topic, value = action_args
+                engine.current_task_frame.emit(topic, value)
+            elif action == "yield":
+                task_status, = action_args
+                yield task_status
+            elif action == "spawn":
+                directive_type, arguments = action_args
+                engine.spawn(directive_type, arguments)
+            else:
+                raise RuntimeError("Unhandled action type: " + action)
+            action_log = action_log.rest
+        elif type(action_log) == RBT_Read:
+            topics = action_log.topics
+            branches = action_log.branches
             new_res = engine.current_task_frame.read(topics)
-            if old_res == new_res:
-                processed_reads.append(new_res)
+            for old_res, rbt in branches:
+                if tuple(old_res) == tuple(new_res):
+                    processed_reads.append(new_res)
+                    action_log = rbt
+                    break
             else:
                 yield step_up_task(register_engine, engine, task_id, directive.type, directive.args, processed_reads, new_res)
         else:
-            raise RuntimeError("Unhandled action type: " + action)
+            raise RuntimeError("Unhandled action log type: " + type(action_log))
 
 
 def step_up_task(register_engine, engine, task_id, directive_type, arguments, reads, last_read):
