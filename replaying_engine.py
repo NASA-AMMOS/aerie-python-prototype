@@ -40,7 +40,7 @@ class SimulationEngine:
     def spawn(self, directive_type, arguments):
         task = make_task(self.model, directive_type, arguments)
         task_id = fresh_task_id(repr(task))
-        self.current_task_frame.action_log.append(("spawn", task_id, directive_type, arguments))
+        self.current_task_frame.action_log.append((self.current_task_frame.task_id, "spawn", directive_type, arguments))
         self.tasks[task_id] = task
         self.task_inputs[task_id] = (directive_type, arguments)
         self.task_directives[task_id] = Directive(directive_type, self.elapsed_time, arguments)
@@ -70,6 +70,9 @@ class SimulationEngine:
             task_status = next(task)
         except StopIteration:
             task_status = Completed()
+        return self.handle_task_status(task_id, task_status)
+
+    def handle_task_status(self, task_id, task_status):
         if type(task_status) == Delay:
             self.schedule.schedule(self.elapsed_time + task_status.duration, task_id)
         elif type(task_status) == AwaitCondition:
@@ -120,13 +123,13 @@ class TaskFrame:
         self.tip = EventGraph.sequentially(self.tip, EventGraph.Atom(Event(topic, value)))
 
     def read(self, topic_or_topics):
-        self.action_log.append((self.task_id, "read", topic_or_topics))
         topics = [topic_or_topics] if type(topic_or_topics) != list else topic_or_topics
         res = []
         for start_offset, x in self.get_visible_history():
             filtered = EventGraph.filter(x, topics)
             if type(filtered) != EventGraph.Empty:
                 res.append((start_offset, filtered))
+        self.action_log.append((self.task_id, "read", topics, res))
         return res
 
     def spawn(self, event_graph):
@@ -229,17 +232,9 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
     unchanged_directives, deleted_directives, added_directives = diff(old_plan.directives, new_plan.directives)
     directive_to_task_id = payload["directive_to_task_id"]
     action_log = payload["action_log"]
+    replayer = Imitator(directive_to_task_id, action_log, register_engine)
     for directive in unchanged_directives:
-        task_id = directive_to_task_id[hashable_directive(directive)]
-        task = task_replayer(engine, action_log[task_id])
-        engine.schedule.schedule(engine.elapsed_time + directive.start_time, task_id)
-        engine.task_start_times[task_id] = engine.elapsed_time + directive.start_time
-        engine.task_inputs[task_id] = (directive.type, directive.args)
-        engine.task_directives[task_id] = directive
-        engine.tasks[task_id] = task
-        result = task_id, task
-        task_id, task = result
-        directive_to_task_id[hashable_directive(directive)] = task_id
+        replayer.imitate(engine, directive)
 
     for directive in added_directives:
         engine.defer(directive.type, directive.start_time, directive.args)
@@ -273,22 +268,107 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
         "directive_to_task_id": directive_to_task_id
     }
 
-def task_replayer(engine: SimulationEngine, action_log):
+class Imitator:
+    def __init__(self, directive_to_task_id, action_log, register_engine):
+        self.directive_to_task_id = directive_to_task_id
+        self.action_log = action_log
+        self.register_engine = register_engine
+
+    def imitate(self, engine, directive):
+        task_id = self.directive_to_task_id[hashable_directive(directive)]
+        task = task_replayer(engine, task_id, directive, self.action_log[task_id], self, self.register_engine)
+        engine.schedule.schedule(engine.elapsed_time + directive.start_time, task_id)
+        engine.task_start_times[task_id] = engine.elapsed_time + directive.start_time
+        engine.task_inputs[task_id] = (directive.type, directive.args)
+        engine.task_directives[task_id] = directive
+        engine.tasks[task_id] = task
+        return task_id
+
+    def imitate_call(self, engine, directive_type, arguments, caller_task_id):
+        callee_task_id = self.imitate(engine, directive)
+        engine.awaiting_tasks[caller_task_id] = callee_task_id
+
+def task_replayer(engine: SimulationEngine, task_id, directive, action_log, imitator, register_engine):
+    processed_reads = []
     for entry in action_log:
         action = entry[0]
+        action_args = entry[1:]
         if action == "emit":
-            topic, value = entry[1:]
+            topic, value = action_args
             engine.current_task_frame.emit(topic, value)
-        elif action == "call":
-            child_task_id, child_directive_type, child_arguments = entry[1:]
-            # TODO use child_task_id
-            yield Call(child_directive_type, child_arguments)
         elif action == "yield":
-            task_status, = entry[1:]
+            task_status, = action_args
             yield task_status
         elif action == "spawn":
-            task_id, directive_type, arguments = entry[1:]
+            directive_type, arguments = action_args
             engine.spawn(directive_type, arguments)
+        elif action == "read":
+            topics, old_res = action_args
+            new_res = engine.current_task_frame.read(topics)
+            if old_res == new_res:
+                processed_reads.append(new_res)
+            else:
+                yield step_up_task(register_engine, engine, task_id, directive.type, directive.args, processed_reads, new_res)
+        else:
+            raise RuntimeError("Unhandled action type: " + action)
+
+
+def step_up_task(register_engine, engine, task_id, directive_type, arguments, reads, last_read):
+    temp_engine = ReplayingSimulationEngine(engine)
+    register_engine(temp_engine)
+    task = make_task(engine.model, directive_type, arguments)
+    engine.tasks[task_id] = task
+    task_status = temp_engine.step_up(task, reads, last_read)
+    register_engine(engine)  # restore main engine
+    return task_status
+
+
+class ReplayingSimulationEngine:
+    def __init__(self, main_engine):
+        self.model = main_engine.model
+        self.main_engine = main_engine
+        self.temp_engine = SimulationEngine()
+        self.current_task_frame = TaskFrame(main_engine.elapsed_time)
+        self.is_stale = False
+
+    def step_up(self, task, reads, last_read):
+        self.current_task_frame = ReplayingTaskFrame(reads, last_read, self.main_engine.current_task_frame, self)
+        task_status = None
+        while not self.is_stale:
+            try:
+                task_status = next(task)
+            except StopIteration:
+                self.is_stale = True
+                task_status = Completed()
+        return task_status
+
+    def spawn(self, directive_type, args):
+        if self.is_stale:
+            self.main_engine.spawn(directive_type, args)
+        else:
+            pass  # ignore
+
+class ReplayingTaskFrame:
+    def __init__(self, reads, last_read, main_task_frame, replaying_engine):
+        self.reads = list(reads)
+        self.last_read = last_read
+        self.main_task_frame = main_task_frame
+        self.replaying_engine = replaying_engine
+
+    def read(self, topic_or_topics):
+        if self.replaying_engine.is_stale:
+            return self.main_task_frame.read(topic_or_topics)
+        if self.reads:
+            return self.reads.pop(0)
+        else:
+            self.replaying_engine.is_stale = True
+            return self.last_read
+
+    def emit(self, topic, value):
+        if self.replaying_engine.is_stale:
+            self.main_task_frame.emit(topic, value)
+        else:
+            pass # ignore
 
 
 def make_generator(f, arguments):

@@ -411,7 +411,7 @@ def test_spawned_activity():
     )
 
 
-def test_restart_task_with_earler_non_stale_read():
+def test_restart_task_with_earlier_non_stale_read():
     incremental_sim_test_case(
         Plan(
             [
