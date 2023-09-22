@@ -335,19 +335,41 @@ class Imitator:
         self.register_engine = register_engine
 
     def imitate(self, engine, directive):
-        old_task_id = self.directive_to_task_id[hashable_directive_without_time(directive)]
-        task_id = fresh_task_id(old_task_id.label)
-        task = task_replayer(engine, task_id, directive, self.action_log[hashable_directive_without_time(directive)], self, self.register_engine)
-        engine.schedule.schedule(engine.elapsed_time + directive.start_time, task_id)
-        engine.task_start_times[task_id] = engine.elapsed_time + directive.start_time
-        engine.task_inputs[task_id] = (directive.type, directive.args)
-        engine.task_directives[task_id] = directive
-        engine.tasks[task_id] = task
-        return task_id
+        action_log = self.action_log.get(hashable_directive_without_time(directive), None)
+        if action_log is not None:
+            old_task_id = self.directive_to_task_id[hashable_directive_without_time(directive)]
+            task_id = fresh_task_id(old_task_id.label)
+            task = task_replayer(engine, task_id, directive, action_log, self, self.register_engine)
+            engine.schedule.schedule(engine.elapsed_time + directive.start_time, task_id)
+            engine.task_start_times[task_id] = engine.elapsed_time + directive.start_time
+            engine.task_inputs[task_id] = (directive.type, directive.args)
+            engine.task_directives[task_id] = directive
+            engine.tasks[task_id] = task
+            return task_id
+        else:
+            return engine.defer(directive.type, directive.start_time, directive.args)
 
-    def imitate_call(self, engine, directive_type, arguments, caller_task_id):
-        callee_task_id = self.imitate(engine, directive)
-        engine.awaiting_tasks[caller_task_id] = callee_task_id
+    def imitate_spawn(self, engine, directive_type, arguments):
+        action_log = self.action_log.get((directive_type, tuple_args(arguments)), None)
+        if action_log is not None:
+            old_task_id = self.directive_to_task_id.get((directive_type, tuple_args(arguments)), None)
+            if old_task_id is not None:
+                task_id = fresh_task_id(old_task_id.label)
+            else:
+                task_id = fresh_task_id()
+            task = task_replayer(engine, task_id, Directive(directive_type, 0, arguments), action_log, self, self.register_engine)
+            engine.current_task_frame.action_log.append((engine.current_task_frame.task_id, "spawn", directive_type, arguments))
+            engine.tasks[task_id] = task
+            engine.task_inputs[task_id] = (directive_type, arguments)
+            engine.task_directives[task_id] = Directive(directive_type, engine.elapsed_time, arguments)
+            engine.task_start_times[task_id] = engine.elapsed_time
+            parent_task_frame = engine.current_task_frame
+            task_status, events = engine.step(task_id, task)
+            parent_task_frame.spawn(events)
+            engine.current_task_frame = parent_task_frame
+            return task_id
+        else:
+            return engine.spawn(directive_type, arguments)
 
 def task_replayer(engine: SimulationEngine, task_id, directive, action_log, imitator, register_engine):
     processed_reads = []
@@ -364,7 +386,8 @@ def task_replayer(engine: SimulationEngine, task_id, directive, action_log, imit
                 yield task_status
             elif action == "spawn":
                 directive_type, arguments = action_args
-                engine.spawn(directive_type, arguments)
+                imitator.imitate_spawn(engine, directive_type, arguments)
+                # engine.spawn(directive_type, arguments)
             else:
                 raise RuntimeError("Unhandled action type: " + action)
             action_log = action_log.rest
