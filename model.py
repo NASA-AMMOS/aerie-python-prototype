@@ -53,7 +53,7 @@ def emit_event(model, topic, value, _):
 def read_topic(model, topic, _):
     import sim as facade
     res = []
-    for start_offset, events in facade.sim_engine.current_task_frame.read(topic):
+    for start_offset, events in facade.sim_engine.current_task_frame.read(topic, identity):
         res.append((start_offset, EventGraph.to_string(events)))
     facade.sim_engine.current_task_frame.emit("history", res)
 
@@ -72,7 +72,7 @@ def read_emit_three_times(model, read_topic, emit_topic, delay, _):
     import sim as facade
     for x in range(3):
         res = []
-        for start_offset, events in facade.sim_engine.current_task_frame.read(read_topic):
+        for start_offset, events in facade.sim_engine.current_task_frame.read(read_topic, identity):
             res.append((start_offset, EventGraph.to_string(events)))
         facade.sim_engine.current_task_frame.emit(emit_topic, res)
         if x < 2:
@@ -87,7 +87,7 @@ def read_emit_three_times_and_whoopee(model, read_topic, emit_topic, delay, _):
     import sim as facade
     for x in range(3):
         res = []
-        for start_offset, events in facade.sim_engine.current_task_frame.read(read_topic):
+        for start_offset, events in facade.sim_engine.current_task_frame.read(read_topic, identity):
             res.append((start_offset, EventGraph.to_string(events)))
         facade.sim_engine.current_task_frame.emit(emit_topic, res)
         if x < 2:
@@ -110,14 +110,18 @@ def parent_of_reading_child(model):
 def reading_child(model):
     import sim as facade
     res = []
-    for start_offset, events in facade.sim_engine.current_task_frame.read("x"):
+    for start_offset, events in facade.sim_engine.current_task_frame.read("x", identity):
         res.append((start_offset, EventGraph.to_string(events)))
     facade.sim_engine.current_task_frame.emit("history", res)
     res = []
-    for start_offset, events in facade.sim_engine.current_task_frame.read("y"):
+    for start_offset, events in facade.sim_engine.current_task_frame.read("y", identity):
         res.append((start_offset, EventGraph.to_string(events)))
     facade.sim_engine.current_task_frame.emit("history", res)
     yield Delay(model.x.get())
+
+
+def identity(x):
+    return x
 
 
 def spawns_reading_child(model):

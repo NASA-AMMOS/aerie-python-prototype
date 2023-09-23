@@ -5,7 +5,7 @@ TO-DO:
 - daemon tasks
 - anonymous tasks
 - sim config
-- be able to find un-stale reads (i.e. take into account the cell function, not just the history)
+- optimize
 """
 from collections import namedtuple
 import inspect
@@ -132,11 +132,11 @@ class ActionLog:
         self.ensure_key_present(task_id)
         self.action_log[task_id].append(("emit", topic, value))
 
-    def read(self, task_id, topics, result):
+    def read(self, task_id, topics, function, result):
         if task_id is None:
             return
         self.ensure_key_present(task_id)
-        self.action_log[task_id].append(("read", topics, result))
+        self.action_log[task_id].append(("read", topics, function, result))
 
     def spawn(self, task_id, directive_type, arguments):
         self.ensure_key_present(task_id)
@@ -187,14 +187,15 @@ class TaskFrame:
         self.action_log.emit(self.task_id, topic, value)
         self.tip = EventGraph.sequentially(self.tip, EventGraph.Atom(Event(topic, value)))
 
-    def read(self, topic_or_topics):
+    def read(self, topic_or_topics, function):
         topics = [topic_or_topics] if type(topic_or_topics) != list else topic_or_topics
         res = []
         for start_offset, x in self.get_visible_history():
             filtered = EventGraph.filter(x, topics)
             if type(filtered) != EventGraph.Empty:
                 res.append((start_offset, filtered))
-        self.action_log.read(self.task_id, topics, res)
+        res = function(res)
+        self.action_log.read(self.task_id, topics, function, res)
         return res
 
     def spawn(self, event_graph):
@@ -290,7 +291,7 @@ def simulate(register_engine, model_class, plan, action_log=None):
 
 RBT_Empty = namedtuple("RBT_Empty", "")
 RBT_NonRead = namedtuple("RBT_NonRead", "payload rest")
-RBT_Read = namedtuple("RBT_Read", "topics branches")
+RBT_Read = namedtuple("RBT_Read", "topics function branches")
 
 
 def make_rbt(actions):
@@ -299,8 +300,8 @@ def make_rbt(actions):
     first, rest = actions[0], actions[1:]
     action, action_args = first[0], first[1:]
     if action == "read":
-        topics, res = action_args
-        return RBT_Read(topics, ((res, make_rbt(rest)),))
+        topics, function, res = action_args
+        return RBT_Read(topics, function, ((res, make_rbt(rest)),))
     else:
         return RBT_NonRead(first, make_rbt(rest))
 
@@ -312,13 +313,11 @@ def extend(rbt, actions):
     action, action_args = first[0], first[1:]
     if action == "read":
         assert type(rbt) == RBT_Read
-        topics, res = action_args
-        res = tuple(res)
+        topics, function, res = action_args
         assert rbt.topics == topics
         new_branches = list()
         found_match = False
         for old_res, old_rbt in rbt.branches:
-            old_res = tuple(old_res)
             if old_res == res:
                 found_match = True
                 new_branches.append((old_res, extend(old_rbt, rest)))
@@ -326,7 +325,7 @@ def extend(rbt, actions):
                 new_branches.append((old_res, old_rbt))
         if not found_match:
             new_branches.append((res, make_rbt(rest)))
-        return RBT_Read(topics, tuple(new_branches))
+        return RBT_Read(topics, function, tuple(new_branches))
     else:
         assert type(rbt) == RBT_NonRead
         return RBT_NonRead(first, extend(rbt.rest, rest))
@@ -395,13 +394,16 @@ def task_replayer(engine: SimulationEngine, task_id, directive_type, args, actio
             action_log = action_log.rest
         elif type(action_log) == RBT_Read:
             topics = action_log.topics
+            function = action_log.function
             branches = action_log.branches
-            new_res = engine.current_task_frame.read(topics)
+            new_res = engine.current_task_frame.read(topics, function)
             for old_res, rbt in branches:
-                if tuple(old_res) == tuple(new_res):
+                if old_res == new_res:
                     processed_reads.append(new_res)
                     action_log = rbt
                     break
+                else:
+                    print()
             else:
                 yield step_up_task(register_engine, engine, task_id, directive_type, args, processed_reads, new_res)
         else:
@@ -449,9 +451,9 @@ class ReplayingTaskFrame:
         self.main_task_frame = main_task_frame
         self.replaying_engine = replaying_engine
 
-    def read(self, topic_or_topics):
+    def read(self, topic_or_topics, function):
         if self.replaying_engine.is_stale:
-            return self.main_task_frame.read(topic_or_topics)
+            return self.main_task_frame.read(topic_or_topics, function)
         if self.reads:
             return self.reads.pop(0)
         else:
@@ -462,7 +464,7 @@ class ReplayingTaskFrame:
         if self.replaying_engine.is_stale:
             self.main_task_frame.emit(topic, value)
         else:
-            pass # ignore
+            pass  # ignore
 
 
 def make_generator(f, arguments):

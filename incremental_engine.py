@@ -130,7 +130,7 @@ class TaskFrame:
             raise ValueError("Cannot emit events when task is None")
         self.tip = EventGraph.sequentially(self.tip, EventGraph.Atom(Event(topic, value, self.task)))
 
-    def read(self, topic_or_topics):
+    def read(self, topic_or_topics, function):
         """
         Returns the visible event history, filtered to the given topic
         """
@@ -142,7 +142,7 @@ class TaskFrame:
             filtered = EventGraph.filter(x, topics)
             if not EventGraph.is_empty(filtered):
                 res.append((start_offset, filtered))
-        return res
+        return function(res)
 
     def spawn(self, event_graph):
         self.branches.append((self.tip, event_graph))

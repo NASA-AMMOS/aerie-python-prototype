@@ -96,14 +96,14 @@ class TaskFrame:
     def emit(self, topic, value):
         self.tip = EventGraph.sequentially(self.tip, EventGraph.Atom(Event(topic, value)))
 
-    def read(self, topic_or_topics):
+    def read(self, topic_or_topics, function):
         topics = [topic_or_topics] if type(topic_or_topics) != list else topic_or_topics
         res = []
         for start_offset, x in self.get_visible_history():
             filtered = EventGraph.filter(x, topics)
             if type(filtered) != EventGraph.Empty:
                 res.append((start_offset, filtered))
-        return res
+        return function(res)
 
     def spawn(self, event_graph):
         self.branches.append((self.tip, event_graph))

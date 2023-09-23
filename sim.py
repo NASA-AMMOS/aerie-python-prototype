@@ -14,8 +14,14 @@ class Register:
         self._initial_value = initial_value
 
     def get(self):
+        read = sim_engine.current_task_frame.read(self._topic, self.function)
+        if type(read) != int:
+            print()
+        return read
+
+    def function(self, history):
         res = self._initial_value
-        for _, event_graph in sim_engine.current_task_frame.read(self._topic):
+        for _, event_graph in history:
             for event in EventGraph.iter(event_graph):
                 res = event.value
         return res
@@ -58,10 +64,13 @@ class Accumulator:
         self._initial_rate = rate
 
     def get(self):
+        return sim_engine.current_task_frame.read(self._topic, self.function)
+
+    def function(self, history):
         value = self._initial_value
         rate = self._initial_rate
         previous_event_time = 0
-        for start_offset, event_graph in sim_engine.current_task_frame.read(self._topic):
+        for start_offset, event_graph in history:
             for event in EventGraph.iter(event_graph):
                 value += rate * (event.start_time - previous_event_time)
                 previous_event_time = event.start_time
