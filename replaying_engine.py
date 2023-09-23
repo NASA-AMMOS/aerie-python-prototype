@@ -26,10 +26,10 @@ def fresh_task_id(label=""):
 
 class SimulationEngine:
     def __init__(self, register_engine, rbt=None):
-        self.action_log = ActionLog()
+        self.action_log = ActionLog(self, rbt)
         self.elapsed_time = 0
         self.events = []  # list of tuples (start_offset, event_graph)
-        self.current_task_frame = TaskFrame(self.elapsed_time)
+        self.current_task_frame = TaskFrame(self.elapsed_time, self.action_log)
         self.schedule = JobSchedule()
         self.model = None  # Filled in by register_model
         self.activity_types_by_name = None  # Filled in by register_model
@@ -40,10 +40,6 @@ class SimulationEngine:
         self.awaiting_tasks = {}  # map from blocking task to blocked task
         self.spans = []
         self.tasks = {}
-
-        if rbt is None:
-            rbt = {}
-        self.rbt = rbt
         self.register_engine = register_engine
 
     def register_model(self, cls):
@@ -80,7 +76,7 @@ class SimulationEngine:
         return task_id, task
 
     def step(self, task_id, task):
-        self.current_task_frame = TaskFrame(self.elapsed_time, task_id=task_id, history=self.current_task_frame.get_visible_history())
+        self.current_task_frame = TaskFrame(self.elapsed_time, self.action_log, task_id=task_id, history=self.current_task_frame.get_visible_history())
         try:
             task_status = next(task)
         except StopIteration:
@@ -112,54 +108,57 @@ class SimulationEngine:
             self.spawn_task(child_task_id, child_task)
         else:
             raise ValueError("Unhandled task status: " + str(task_status))
-        self.action_log.extend(self.current_task_frame.action_log)
         self.action_log.yield_(task_id, task_status)
         return task_status, self.current_task_frame.collect()
 
     def make_task(self, task_id, directive_type, args):
+        rbt = self.action_log.to_rbt()
         key = (directive_type, tuple_args(args))
-        if key in self.rbt:
-            return task_replayer(self, task_id, Directive(directive_type, 0, args), self.rbt[key], Imitator(self.rbt, self.register_engine), self.register_engine)
+        if key in rbt:
+            return task_replayer(self, task_id, Directive(directive_type, 0, args), rbt[key], Imitator(rbt, self.register_engine), self.register_engine)
         else:
             return make_task(self.model, directive_type, args)
 
 class ActionLog:
-    def __init__(self):
-        self.root = RBT()
-        self.tip = self.root
-        self.action_log = []
+    def __init__(self, engine, rbt):
+        self.action_log = {}
+        if rbt is None:
+            rbt = {}
+        self.rbt = rbt
+        self.engine = engine
 
-    def extend(self, action_log):
-        self.action_log.extend(action_log.action_log)
+    def ensure_key_present(self, key):
+        if key not in self.action_log:
+            self.action_log[key] = []
 
     def emit(self, task_id, topic, value):
-        self.action_log.append((task_id, "emit", topic, value))
+        self.ensure_key_present(task_id)
+        self.action_log[task_id].append(("emit", topic, value))
 
     def read(self, task_id, topics, result):
-        self.action_log.append((task_id, "read", topics, result))
+        if task_id is None:
+            return
+        self.ensure_key_present(task_id)
+        self.action_log[task_id].append(("read", topics, result))
 
     def spawn(self, task_id, directive_type, arguments):
-        self.action_log.append((task_id, "spawn", directive_type, arguments))
+        self.ensure_key_present(task_id)
+        self.action_log[task_id].append(("spawn", directive_type, arguments))
 
     def yield_(self, task_id, task_status):
-        self.action_log.append((task_id, "yield", task_status))
+        self.ensure_key_present(task_id)
+        self.action_log[task_id].append(("yield", task_status))
 
-    def to_rbt(self, task_directives):
-        action_log_by_id = {}
-        for x in self.action_log:
-            if x[0] not in action_log_by_id:
-                action_log_by_id[x[0]] = []
-            action_log_by_id[x[0]].append(x[1:])
-
+    def to_rbt(self):
         # action log structure:
         # key: hashable(directive name, args)
         # value: a read-branching tree. It is one of:
         # - NonRead(payload, next)
         # - Read(topic, Map[Value, read-branching tree])
 
-        action_log = {}
-        for task_id, actions in action_log_by_id.items():
-            directive = task_directives[task_id]
+        action_log = dict(self.rbt)
+        for task_id, actions in self.action_log.items():
+            directive = self.engine.task_directives[task_id]
             key = (directive.type, tuple_args(directive.args))
             if key in action_log:
                 action_log[key] = extend(action_log[key], actions)
@@ -168,15 +167,10 @@ class ActionLog:
         return action_log
 
 
-class RBT:
-    def __init__(self):
-        pass
-
-
 class TaskFrame:
     Branch = namedtuple("Branch", "base event_graph")
 
-    def __init__(self, elapsed_time, task_id=None, history=None):
+    def __init__(self, elapsed_time, action_log, task_id=None, history=None):
         if history is None:
             history = []
         self.task_id = task_id
@@ -184,7 +178,7 @@ class TaskFrame:
         self.history = history
         self.branches = []
         self.elapsed_time = elapsed_time
-        self.action_log = ActionLog()
+        self.action_log = action_log
 
     def emit(self, topic, value):
         self.action_log.emit(self.task_id, topic, value)
@@ -276,7 +270,7 @@ def simulate(register_engine, model_class, plan, rbt=None):
                 engine.events.append((engine.elapsed_time, batch_event_graph))
         old_awaiting_conditions = list(engine.awaiting_conditions)
         engine.awaiting_conditions.clear()
-        engine.current_task_frame = TaskFrame(engine.elapsed_time, history=engine.events)
+        engine.current_task_frame = TaskFrame(engine.elapsed_time, engine.action_log, history=engine.events)
         while old_awaiting_conditions:
             condition, task_id = old_awaiting_conditions.pop()
             if condition():
@@ -287,7 +281,7 @@ def simulate(register_engine, model_class, plan, rbt=None):
 
 
     return sorted(engine.spans, key=lambda x: (x[1], x[2])), list(engine.events), {
-        "action_log": engine.action_log.to_rbt(engine.task_directives)
+        "action_log": engine.action_log.to_rbt()
     }
 
 
@@ -425,7 +419,7 @@ class ReplayingSimulationEngine:
     def __init__(self, main_engine):
         self.model = main_engine.model
         self.main_engine = main_engine
-        self.current_task_frame = TaskFrame(main_engine.elapsed_time)
+        self.current_task_frame = TaskFrame(main_engine.elapsed_time, main_engine.action_log)
         self.is_stale = False
 
     def step_up(self, task, reads, last_read):
