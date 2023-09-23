@@ -26,7 +26,7 @@ def fresh_task_id(label=""):
     return TaskId(__task_id_counter, label)
 
 class SimulationEngine:
-    def __init__(self):
+    def __init__(self, register_engine, rbt=None):
         self.action_log = []
         self.elapsed_time = 0
         self.events = []  # list of tuples (start_offset, event_graph)
@@ -42,14 +42,20 @@ class SimulationEngine:
         self.spans = []
         self.tasks = {}
 
+        if rbt is None:
+            rbt = {}
+        self.rbt = rbt
+        self.register_engine = register_engine
+
     def register_model(self, cls):
         self.model = cls()
         self.activity_types_by_name = self.model.get_activity_types()
         return self.model
 
     def spawn(self, directive_type, arguments):
+        task_id = fresh_task_id(str(directive_type) + " " + str(arguments))
+        self.make_task(task_id, directive_type, arguments)
         task = make_task(self.model, directive_type, arguments)
-        task_id = fresh_task_id(repr(task))
         self.current_task_frame.action_log.append((self.current_task_frame.task_id, "spawn", directive_type, arguments))
         self.tasks[task_id] = task
         self.task_inputs[task_id] = (directive_type, arguments)
@@ -98,8 +104,8 @@ class SimulationEngine:
                 self.schedule.schedule(self.elapsed_time, self.awaiting_tasks[task_id])
                 del self.awaiting_tasks[task_id]
         elif type(task_status) == Call:
-            child_task = make_task(self.model, task_status.child_task, task_status.args)
-            child_task_id = fresh_task_id(repr(child_task))
+            child_task_id = fresh_task_id(repr((task_status.child_task, task_status.args)))
+            child_task = self.make_task(child_task_id, task_status.child_task, task_status.args)
             self.tasks[child_task_id] = child_task
             self.awaiting_tasks[child_task_id] = task_id
             self.task_inputs[child_task_id] = (task_status.child_task, task_status.args)
@@ -110,6 +116,13 @@ class SimulationEngine:
         self.action_log.extend(self.current_task_frame.action_log)
         self.action_log.append((task_id, "yield", task_status))
         return task_status, self.current_task_frame.collect()
+
+    def make_task(self, task_id, directive_type, args):
+        key = (directive_type, tuple_args(args))
+        if key in self.rbt:
+            return task_replayer(self, task_id, Directive(directive_type, 0, args), self.rbt[key], Imitator(self.rbt, self.register_engine), self.register_engine)
+        else:
+            return make_task(self.model, directive_type, args)
 
 
 class TaskFrame:
@@ -191,7 +204,7 @@ class JobSchedule:
 
 
 def simulate(register_engine, model_class, plan):
-    engine = SimulationEngine()
+    engine = SimulationEngine(register_engine)
     engine.register_model(model_class)
     register_engine(engine)
 
@@ -244,9 +257,7 @@ def simulate(register_engine, model_class, plan):
         else:
             action_log[key] = make_rbt(actions)
 
-
     return sorted(engine.spans, key=lambda x: (x[1], x[2])), list(engine.events), {
-        "directive_to_task_id": directive_to_task_id,
         "action_log": action_log
     }
 
@@ -296,13 +307,12 @@ def extend(rbt, actions):
 
 
 def simulate_incremental(register_engine, model_class, new_plan, old_plan, payload):
-    engine = SimulationEngine()
+    engine = SimulationEngine(register_engine, rbt=payload["action_log"])
     engine.register_model(model_class)
     register_engine(engine)
     unchanged_directives, deleted_directives, added_directives = diff(old_plan.directives, new_plan.directives)
-    directive_to_task_id = payload["directive_to_task_id"]
     action_log = payload["action_log"]
-    replayer = Imitator(directive_to_task_id, action_log, register_engine)
+    replayer = Imitator(action_log, register_engine)
     for directive in unchanged_directives:
         replayer.imitate(engine, directive)
 
@@ -334,21 +344,18 @@ def simulate_incremental(register_engine, model_class, new_plan, old_plan, paylo
     # COPY END
 
     return sorted(engine.spans, key=lambda x: (x[1], x[2])), list(engine.events), {
-        "action_log": [],
-        "directive_to_task_id": directive_to_task_id
+        "action_log": {}
     }
 
 class Imitator:
-    def __init__(self, directive_to_task_id, action_log, register_engine):
-        self.directive_to_task_id = directive_to_task_id
+    def __init__(self, action_log, register_engine):
         self.action_log = action_log
         self.register_engine = register_engine
 
     def imitate(self, engine, directive):
         action_log = self.action_log.get(hashable_directive_without_time(directive), None)
         if action_log is not None:
-            old_task_id = self.directive_to_task_id[hashable_directive_without_time(directive)]
-            task_id = fresh_task_id(old_task_id.label)
+            task_id = fresh_task_id(repr(directive))
             task = task_replayer(engine, task_id, directive, action_log, self, self.register_engine)
             engine.schedule.schedule(engine.elapsed_time + directive.start_time, task_id)
             engine.task_start_times[task_id] = engine.elapsed_time + directive.start_time
@@ -362,11 +369,7 @@ class Imitator:
     def imitate_spawn(self, engine, directive_type, arguments):
         action_log = self.action_log.get((directive_type, tuple_args(arguments)), None)
         if action_log is not None:
-            old_task_id = self.directive_to_task_id.get((directive_type, tuple_args(arguments)), None)
-            if old_task_id is not None:
-                task_id = fresh_task_id(old_task_id.label)
-            else:
-                task_id = fresh_task_id()
+            task_id = fresh_task_id(repr((directive_type, arguments)))
             task = task_replayer(engine, task_id, Directive(directive_type, 0, arguments), action_log, self, self.register_engine)
             engine.current_task_frame.action_log.append((engine.current_task_frame.task_id, "spawn", directive_type, arguments))
             engine.tasks[task_id] = task
@@ -430,7 +433,6 @@ class ReplayingSimulationEngine:
     def __init__(self, main_engine):
         self.model = main_engine.model
         self.main_engine = main_engine
-        self.temp_engine = SimulationEngine()
         self.current_task_frame = TaskFrame(main_engine.elapsed_time)
         self.is_stale = False
 

@@ -1,3 +1,5 @@
+import inspect
+
 import engine as sim
 # import incremental_engine as incremental_sim
 import replaying_engine as incremental_sim
@@ -107,10 +109,24 @@ def error_on_rerun(name, predicate=lambda kwargs: True):
     def foo(model, **kwargs):
         if predicate(kwargs):
             raise ValueError("Reran " + str(name))
-        for x in incremental_sim.make_task(model_.Model(), name, kwargs):
+        for x in make_task(model_.Model(), name, kwargs):
             yield x
 
     return foo
+
+
+def make_task(model, directive_type, arguments):
+    func = model.get_activity_types()[directive_type]
+    if inspect.isgeneratorfunction(func):
+        return func.__call__(model, **arguments)
+    else:
+        return make_generator(func, dict(**arguments, model=model))
+
+
+def make_generator(f, arguments):
+    if False:
+        yield
+    f(**arguments)
 
 
 def test_more_complex_add_only():
@@ -451,6 +467,30 @@ def test_spawned_activity_no_changes():
         {
             "emit_event": error_on_rerun("emit_event", lambda kwargs: kwargs["_"] == 10),
             "spawns_reading_child": error_on_rerun("spawns_reading_child"),
+            "reading_child": error_on_rerun("reading_child"),
+        },
+    )
+
+def test_called_activity_no_changes():
+    """
+    Identical plan, should not require rerunning child
+    """
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("emit_event", 2, {"topic": "z", "value": 1, "_": 10}),
+                Directive("parent_of_reading_child", 10, {}),
+            ]
+        ),
+        Plan(
+            [
+                Directive("emit_event", 2, {"topic": "z", "value": 1, "_": 10}),
+                Directive("parent_of_reading_child", 10, {}),
+            ]
+        ),
+        {
+            "emit_event": error_on_rerun("emit_event", lambda kwargs: kwargs["_"] == 10),
+            "parent_of_reading_child": error_on_rerun("parent_of_reading_child"),
             "reading_child": error_on_rerun("reading_child"),
         },
     )
