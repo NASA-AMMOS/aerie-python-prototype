@@ -11,7 +11,6 @@ TO-DO:
 from collections import namedtuple
 import inspect
 
-from plan_diff import diff
 from protocol import Completed, Delay, AwaitCondition, Call, Directive, hashable_directive_without_time, tuple_args
 from event_graph import EventGraph
 
@@ -25,8 +24,8 @@ def fresh_task_id(label=""):
     return TaskId(__task_id_counter, label)
 
 class SimulationEngine:
-    def __init__(self, register_engine, rbt=None):
-        self.action_log = ActionLog(self, rbt)
+    def __init__(self, register_engine, action_log=None):
+        self.action_log = ActionLog(self, action_log)
         self.elapsed_time = 0
         self.events = []  # list of tuples (start_offset, event_graph)
         self.current_task_frame = TaskFrame(self.elapsed_time, self.action_log)
@@ -112,19 +111,18 @@ class SimulationEngine:
         return task_status, self.current_task_frame.collect()
 
     def make_task(self, task_id, directive_type, args):
-        rbt = self.action_log.to_rbt()
-        key = (directive_type, tuple_args(args))
-        if key in rbt:
-            return task_replayer(self, task_id, Directive(directive_type, 0, args), rbt[key], Imitator(rbt, self.register_engine), self.register_engine)
+        if self.action_log.contains_key(directive_type, args):
+            return task_replayer(self, task_id, directive_type, args, self.action_log.get(directive_type, args), Imitator(self.action_log, self.register_engine), self.register_engine)
         else:
             return make_task(self.model, directive_type, args)
 
 class ActionLog:
-    def __init__(self, engine, rbt):
+    def __init__(self, engine, old_action_log):
         self.action_log = {}
-        if rbt is None:
-            rbt = {}
-        self.rbt = rbt
+        if old_action_log is None:
+            self.rbt = {}
+        else:
+            self.rbt = old_action_log.to_rbt()
         self.engine = engine
 
     def ensure_key_present(self, key):
@@ -148,6 +146,12 @@ class ActionLog:
     def yield_(self, task_id, task_status):
         self.ensure_key_present(task_id)
         self.action_log[task_id].append(("yield", task_status))
+
+    def contains_key(self, directive_type, args):
+        return (directive_type, tuple_args(args)) in self.to_rbt()
+
+    def get(self, directive_type, args):
+        return self.to_rbt().get((directive_type, tuple_args(args)), None)
 
     def to_rbt(self):
         # action log structure:
@@ -245,8 +249,8 @@ class JobSchedule:
         return len(self._schedule) == 0
 
 
-def simulate(register_engine, model_class, plan, rbt=None):
-    engine = SimulationEngine(register_engine, rbt=rbt)
+def simulate(register_engine, model_class, plan, action_log=None):
+    engine = SimulationEngine(register_engine, action_log=action_log)
     engine.register_model(model_class)
     register_engine(engine)
 
@@ -281,7 +285,7 @@ def simulate(register_engine, model_class, plan, rbt=None):
 
 
     return sorted(engine.spans, key=lambda x: (x[1], x[2])), list(engine.events), {
-        "action_log": engine.action_log.to_rbt()
+        "action_log": engine.action_log
     }
 
 
@@ -330,7 +334,7 @@ def extend(rbt, actions):
 
 
 def simulate_incremental(register_engine, model_class, new_plan, old_plan, payload):
-    return simulate(register_engine, model_class, new_plan, rbt=payload["action_log"])
+    return simulate(register_engine, model_class, new_plan, action_log=payload["action_log"])
 
 
 class Imitator:
@@ -339,7 +343,7 @@ class Imitator:
         self.register_engine = register_engine
 
     def imitate(self, engine, directive):
-        action_log = self.action_log.get(hashable_directive_without_time(directive), None)
+        action_log = self.action_log.get(directive.type, directive.args)
         if action_log is not None:
             task_id = fresh_task_id(repr(directive))
             task = task_replayer(engine, task_id, directive, action_log, self, self.register_engine)
@@ -353,10 +357,10 @@ class Imitator:
             return engine.defer(directive.type, directive.start_time, directive.args)
 
     def imitate_spawn(self, engine, directive_type, arguments):
-        action_log = self.action_log.get((directive_type, tuple_args(arguments)), None)
+        action_log = self.action_log.get(directive_type, arguments)
         if action_log is not None:
             task_id = fresh_task_id(repr((directive_type, arguments)))
-            task = task_replayer(engine, task_id, Directive(directive_type, 0, arguments), action_log, self, self.register_engine)
+            task = task_replayer(engine, task_id, directive_type, arguments, action_log, self, self.register_engine)
             engine.current_task_frame.action_log.spawn(engine.current_task_frame.task_id, directive_type, arguments)
             engine.tasks[task_id] = task
             engine.task_inputs[task_id] = (directive_type, arguments)
@@ -370,7 +374,7 @@ class Imitator:
         else:
             return engine.spawn(directive_type, arguments)
 
-def task_replayer(engine: SimulationEngine, task_id, directive, action_log, imitator, register_engine):
+def task_replayer(engine: SimulationEngine, task_id, directive_type, args, action_log, imitator, register_engine):
     processed_reads = []
     while type(action_log) != RBT_Empty:
         if type(action_log) == RBT_NonRead:
@@ -400,7 +404,7 @@ def task_replayer(engine: SimulationEngine, task_id, directive, action_log, imit
                     action_log = rbt
                     break
             else:
-                yield step_up_task(register_engine, engine, task_id, directive.type, directive.args, processed_reads, new_res)
+                yield step_up_task(register_engine, engine, task_id, directive_type, args, processed_reads, new_res)
         else:
             raise RuntimeError("Unhandled action log type: " + type(action_log))
 
