@@ -5,7 +5,6 @@ TO-DO:
 - daemon tasks
 - anonymous tasks
 - sim config
-- try not to re-run called tasks
 - be able to find un-stale reads (i.e. take into account the cell function, not just the history)
 - perhaps avoid re-running tasks within the same simulation (e.g. if same directive repeated)
 """
@@ -71,8 +70,8 @@ class SimulationEngine:
         self.current_task_frame = parent_task_frame
 
     def defer(self, directive_type, duration, arguments):
-        task = make_task(self.model, directive_type, arguments)
-        task_id = fresh_task_id(repr(task))
+        task_id = fresh_task_id(repr((directive_type, arguments)))
+        task = self.make_task(task_id, directive_type, arguments)
         self.schedule.schedule(self.elapsed_time + duration, task_id)
         self.task_start_times[task_id] = self.elapsed_time + duration
         self.task_inputs[task_id] = (directive_type, arguments)
@@ -203,8 +202,8 @@ class JobSchedule:
         return len(self._schedule) == 0
 
 
-def simulate(register_engine, model_class, plan):
-    engine = SimulationEngine(register_engine)
+def simulate(register_engine, model_class, plan, rbt=None):
+    engine = SimulationEngine(register_engine, rbt=rbt)
     engine.register_model(model_class)
     register_engine(engine)
 
@@ -307,45 +306,8 @@ def extend(rbt, actions):
 
 
 def simulate_incremental(register_engine, model_class, new_plan, old_plan, payload):
-    engine = SimulationEngine(register_engine, rbt=payload["action_log"])
-    engine.register_model(model_class)
-    register_engine(engine)
-    unchanged_directives, deleted_directives, added_directives = diff(old_plan.directives, new_plan.directives)
-    action_log = payload["action_log"]
-    replayer = Imitator(action_log, register_engine)
-    for directive in unchanged_directives:
-        replayer.imitate(engine, directive)
+    return simulate(register_engine, model_class, new_plan, rbt=payload["action_log"])
 
-    for directive in added_directives:
-        engine.defer(directive.type, directive.start_time, directive.args)
-
-    # COPY START
-    while not engine.schedule.is_empty():
-        resume_time = engine.schedule.peek_next_time()
-        engine.elapsed_time = resume_time
-        batch_event_graph = EventGraph.empty()
-        for task_id in engine.schedule.get_next_batch():
-            task_status, event_graph = engine.step(task_id, engine.tasks[task_id])
-            batch_event_graph = EventGraph.concurrently(batch_event_graph, event_graph)
-        if type(batch_event_graph) != EventGraph.Empty:
-            if engine.events and engine.events[-1][0] == engine.elapsed_time:
-                engine.events[-1] = (engine.elapsed_time, EventGraph.sequentially(engine.events[-1][1], batch_event_graph))
-            else:
-                engine.events.append((engine.elapsed_time, batch_event_graph))
-        old_awaiting_conditions = list(engine.awaiting_conditions)
-        engine.awaiting_conditions.clear()
-        engine.current_task_frame = TaskFrame(engine.elapsed_time, history=engine.events)
-        while old_awaiting_conditions:
-            condition, task_id = old_awaiting_conditions.pop()
-            if condition():
-                engine.schedule.schedule(engine.elapsed_time, task_id)
-            else:
-                engine.awaiting_conditions.append((condition, task_id))
-    # COPY END
-
-    return sorted(engine.spans, key=lambda x: (x[1], x[2])), list(engine.events), {
-        "action_log": {}
-    }
 
 class Imitator:
     def __init__(self, action_log, register_engine):
