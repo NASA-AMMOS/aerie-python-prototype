@@ -6,7 +6,6 @@ TO-DO:
 - anonymous tasks
 - sim config
 - be able to find un-stale reads (i.e. take into account the cell function, not just the history)
-- perhaps avoid re-running tasks within the same simulation (e.g. if same directive repeated)
 """
 from collections import namedtuple
 import inspect
