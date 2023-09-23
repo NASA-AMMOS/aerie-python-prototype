@@ -26,7 +26,7 @@ def fresh_task_id(label=""):
 
 class SimulationEngine:
     def __init__(self, register_engine, rbt=None):
-        self.action_log = []
+        self.action_log = ActionLog()
         self.elapsed_time = 0
         self.events = []  # list of tuples (start_offset, event_graph)
         self.current_task_frame = TaskFrame(self.elapsed_time)
@@ -55,7 +55,7 @@ class SimulationEngine:
         task_id = fresh_task_id(str(directive_type) + " " + str(arguments))
         self.make_task(task_id, directive_type, arguments)
         task = make_task(self.model, directive_type, arguments)
-        self.current_task_frame.action_log.append((self.current_task_frame.task_id, "spawn", directive_type, arguments))
+        self.current_task_frame.action_log.spawn(self.current_task_frame.task_id, directive_type, arguments)
         self.tasks[task_id] = task
         self.task_inputs[task_id] = (directive_type, arguments)
         self.task_directives[task_id] = Directive(directive_type, self.elapsed_time, arguments)
@@ -113,7 +113,7 @@ class SimulationEngine:
         else:
             raise ValueError("Unhandled task status: " + str(task_status))
         self.action_log.extend(self.current_task_frame.action_log)
-        self.action_log.append((task_id, "yield", task_status))
+        self.action_log.yield_(task_id, task_status)
         return task_status, self.current_task_frame.collect()
 
     def make_task(self, task_id, directive_type, args):
@@ -122,6 +122,55 @@ class SimulationEngine:
             return task_replayer(self, task_id, Directive(directive_type, 0, args), self.rbt[key], Imitator(self.rbt, self.register_engine), self.register_engine)
         else:
             return make_task(self.model, directive_type, args)
+
+class ActionLog:
+    def __init__(self):
+        self.root = RBT()
+        self.tip = self.root
+        self.action_log = []
+
+    def extend(self, action_log):
+        self.action_log.extend(action_log.action_log)
+
+    def emit(self, task_id, topic, value):
+        self.action_log.append((task_id, "emit", topic, value))
+
+    def read(self, task_id, topics, result):
+        self.action_log.append((task_id, "read", topics, result))
+
+    def spawn(self, task_id, directive_type, arguments):
+        self.action_log.append((task_id, "spawn", directive_type, arguments))
+
+    def yield_(self, task_id, task_status):
+        self.action_log.append((task_id, "yield", task_status))
+
+    def to_rbt(self, task_directives):
+        action_log_by_id = {}
+        for x in self.action_log:
+            if x[0] not in action_log_by_id:
+                action_log_by_id[x[0]] = []
+            action_log_by_id[x[0]].append(x[1:])
+
+        # action log structure:
+        # key: hashable(directive name, args)
+        # value: a read-branching tree. It is one of:
+        # - NonRead(payload, next)
+        # - Read(topic, Map[Value, read-branching tree])
+
+        action_log = {}
+        for task_id, actions in action_log_by_id.items():
+            directive = task_directives[task_id]
+            key = (directive.type, tuple_args(directive.args))
+            if key in action_log:
+                action_log[key] = extend(action_log[key], actions)
+            else:
+                action_log[key] = make_rbt(actions)
+        return action_log
+
+
+class RBT:
+    def __init__(self):
+        pass
 
 
 class TaskFrame:
@@ -135,10 +184,10 @@ class TaskFrame:
         self.history = history
         self.branches = []
         self.elapsed_time = elapsed_time
-        self.action_log = []
+        self.action_log = ActionLog()
 
     def emit(self, topic, value):
-        self.action_log.append((self.task_id, "emit", topic, value))
+        self.action_log.emit(self.task_id, topic, value)
         self.tip = EventGraph.sequentially(self.tip, EventGraph.Atom(Event(topic, value)))
 
     def read(self, topic_or_topics):
@@ -148,7 +197,7 @@ class TaskFrame:
             filtered = EventGraph.filter(x, topics)
             if type(filtered) != EventGraph.Empty:
                 res.append((start_offset, filtered))
-        self.action_log.append((self.task_id, "read", topics, res))
+        self.action_log.read(self.task_id, topics, res)
         return res
 
     def spawn(self, event_graph):
@@ -235,29 +284,10 @@ def simulate(register_engine, model_class, plan, rbt=None):
             else:
                 engine.awaiting_conditions.append((condition, task_id))
 
-    action_log_by_id = {}
-    for x in engine.action_log:
-        if x[0] not in action_log_by_id:
-            action_log_by_id[x[0]] = []
-        action_log_by_id[x[0]].append(x[1:])
 
-    # action log structure:
-    # key: hashable(directive name, args)
-    # value: a read-branching tree. It is one of:
-    # - NonRead(payload, next)
-    # - Read(topic, Map[Value, read-branching tree])
-
-    action_log = {}
-    for task_id, actions in action_log_by_id.items():
-        directive = engine.task_directives[task_id]
-        key = (directive.type, tuple_args(directive.args))
-        if key in action_log:
-            action_log[key] = extend(action_log[key], actions)
-        else:
-            action_log[key] = make_rbt(actions)
 
     return sorted(engine.spans, key=lambda x: (x[1], x[2])), list(engine.events), {
-        "action_log": action_log
+        "action_log": engine.action_log.to_rbt(engine.task_directives)
     }
 
 
@@ -333,7 +363,7 @@ class Imitator:
         if action_log is not None:
             task_id = fresh_task_id(repr((directive_type, arguments)))
             task = task_replayer(engine, task_id, Directive(directive_type, 0, arguments), action_log, self, self.register_engine)
-            engine.current_task_frame.action_log.append((engine.current_task_frame.task_id, "spawn", directive_type, arguments))
+            engine.current_task_frame.action_log.spawn(engine.current_task_frame.task_id, directive_type, arguments)
             engine.tasks[task_id] = task
             engine.task_inputs[task_id] = (directive_type, arguments)
             engine.task_directives[task_id] = Directive(directive_type, engine.elapsed_time, arguments)
