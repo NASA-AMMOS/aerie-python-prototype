@@ -33,7 +33,8 @@ class SimulationEngine:
         self.task_directives[task] = Directive(directive_type, self.elapsed_time, arguments)
         self.spawn_task(task)
 
-    def spawn_anonymous(self, task):
+    def spawn_anonymous(self, task_factory):
+        task = task_factory()
         self.task_inputs[task] = ("unknown", {})
         self.task_directives[task] = Directive("unknown", self.elapsed_time, {})
         self.spawn_task(task)

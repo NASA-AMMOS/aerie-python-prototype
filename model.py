@@ -223,7 +223,7 @@ def my_anonymous_task(model, delay):
         yield Delay(delay)
         x = model.x.get()
         model.y.set(x + 1)
-    return task()
+    return task
 
 
 def no_op(model):

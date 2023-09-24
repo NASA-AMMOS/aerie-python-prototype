@@ -57,7 +57,8 @@ class SimulationEngine:
         self.spawn_task(task_id, task)
         return task_id
 
-    def spawn_anonymous(self, task):
+    def spawn_anonymous(self, task_factory):
+        task = task_factory()
         task_id = fresh_task_id(repr(task))
         self.current_task_frame.action_log.spawn(self.current_task_frame.task_id, "unknown", {})
         self.tasks[task_id] = task
