@@ -10,7 +10,8 @@ TO-DO:
 from collections import namedtuple
 import inspect
 
-from protocol import Completed, Delay, AwaitCondition, Call, Directive, hashable_directive_without_time, tuple_args
+from protocol import Completed, Delay, AwaitCondition, Call, Directive, hashable_directive_without_time, tuple_args, \
+    make_generator
 from event_graph import EventGraph
 
 Event = namedtuple("Event", "topic value")
@@ -53,6 +54,15 @@ class SimulationEngine:
         self.tasks[task_id] = task
         self.task_inputs[task_id] = (directive_type, arguments)
         self.task_directives[task_id] = Directive(directive_type, self.elapsed_time, arguments)
+        self.spawn_task(task_id, task)
+        return task_id
+
+    def spawn_anonymous(self, task):
+        task_id = fresh_task_id(repr(task))
+        self.current_task_frame.action_log.spawn(self.current_task_frame.task_id, "unknown", {})
+        self.tasks[task_id] = task
+        self.task_inputs[task_id] = ("unknown", {})
+        self.task_directives[task_id] = Directive("unknown", self.elapsed_time, {})
         self.spawn_task(task_id, task)
         return task_id
 
@@ -402,8 +412,6 @@ def task_replayer(engine: SimulationEngine, task_id, directive_type, args, actio
                     processed_reads.append(new_res)
                     action_log = rbt
                     break
-                else:
-                    print()
             else:
                 yield step_up_task(register_engine, engine, task_id, directive_type, args, processed_reads, new_res)
         else:
@@ -465,9 +473,3 @@ class ReplayingTaskFrame:
             self.main_task_frame.emit(topic, value)
         else:
             pass  # ignore
-
-
-def make_generator(f, arguments):
-    if False:
-        yield
-    f(**arguments)

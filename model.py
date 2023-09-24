@@ -1,5 +1,5 @@
 from event_graph import EventGraph
-from sim import Register, Accumulator, Delay, AwaitCondition, spawn, Call
+from sim import Register, Accumulator, Delay, AwaitCondition, spawn, Call, spawn_anonymous
 
 
 def my_activity(model: "Model", param1):
@@ -210,6 +210,26 @@ def call_then_read(model):
     facade.sim_engine.current_task_frame.emit("y", model.x.get())
 
 
+def spawns_anonymous_task(model):
+    yield Delay(1)
+    spawn_anonymous(my_anonymous_task(model, 1))
+    yield Delay(2)
+    x = model.x.get()
+    model.y.set(x * 100)
+
+
+def my_anonymous_task(model, delay):
+    def task():
+        yield Delay(delay)
+        x = model.x.get()
+        model.y.set(x + 1)
+    return task()
+
+
+def no_op(model):
+    pass
+
+
 class Model:
     def __init__(self):
         self.x = Register("x", 55)
@@ -247,6 +267,8 @@ class Model:
             emit_and_delay,
             await_x_greater_than,
             await_y_greater_than,
-            call_then_read
+            call_then_read,
+            spawns_anonymous_task,
+            no_op
         ]
         return {x.__name__: x for x in activity_types}

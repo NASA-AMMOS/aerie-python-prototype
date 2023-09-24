@@ -1,11 +1,16 @@
 from collections import namedtuple
 
-from protocol import Delay, AwaitCondition, EventGraph, Call
+from protocol import Delay, AwaitCondition, EventGraph, Call, make_generator
 
 sim_engine = None
 
 def spawn(*args, **kwargs):
     sim_engine.spawn(*args, **kwargs)
+
+
+def spawn_anonymous(task):
+    sim_engine.spawn_anonymous(task)
+
 
 
 class Register:

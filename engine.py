@@ -2,7 +2,7 @@
 from collections import namedtuple
 import inspect
 
-from protocol import Completed, Delay, AwaitCondition, Call, Directive, Plan
+from protocol import Completed, Delay, AwaitCondition, Call, Directive, make_generator
 from event_graph import EventGraph
 
 Event = namedtuple("Event", "topic value")
@@ -31,6 +31,11 @@ class SimulationEngine:
         task = make_task(self.model, directive_type, arguments)
         self.task_inputs[task] = (directive_type, arguments)
         self.task_directives[task] = Directive(directive_type, self.elapsed_time, arguments)
+        self.spawn_task(task)
+
+    def spawn_anonymous(self, task):
+        self.task_inputs[task] = ("unknown", {})
+        self.task_directives[task] = Directive("unknown", self.elapsed_time, {})
         self.spawn_task(task)
 
     def spawn_task(self, task):
@@ -190,8 +195,3 @@ def simulate(register_engine, model_class, plan):
                 engine.awaiting_conditions.append((condition, task))
     return sorted(engine.spans, key=lambda x: (x[1], x[2])), list(engine.events), None  # Third item is "payload", unused.
 
-
-def make_generator(f, arguments):
-    if False:
-        yield
-    f(**arguments)

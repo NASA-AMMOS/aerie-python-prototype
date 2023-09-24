@@ -34,3 +34,8 @@ def hashable_directive_without_time(directive):
 
 def restore_directive(hashable_directive):
     return Directive(hashable_directive.type, hashable_directive.start_time, untuple_args(hashable_directive.args))
+
+def make_generator(f, arguments):
+    if False:
+        yield
+    f(**arguments)

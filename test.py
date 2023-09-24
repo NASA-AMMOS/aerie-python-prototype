@@ -5,7 +5,7 @@ import engine as sim
 import replaying_engine as incremental_sim
 import model
 import sim as facade
-from protocol import Plan, Directive, hashable_directive
+from protocol import Plan, Directive, hashable_directive, make_generator
 
 model_ = model
 
@@ -121,12 +121,6 @@ def make_task(model, directive_type, arguments):
         return func.__call__(model, **arguments)
     else:
         return make_generator(func, dict(**arguments, model=model))
-
-
-def make_generator(f, arguments):
-    if False:
-        yield
-    f(**arguments)
 
 
 def test_more_complex_add_only():
@@ -673,6 +667,40 @@ def test_call_then_read():
         ),
         {"emit_event": error_on_rerun("emit_event", lambda kwargs: kwargs["_"] == 10)}
          # "call_then_read": error_on_rerun("call_then_read")},
+    )
+
+
+def test_no_op():
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("no_op", 2, {}),
+            ]
+        ),
+        Plan(
+            [
+                Directive("no_op", 2, {}),
+            ]
+        ),
+        {"no_op": error_on_rerun("no_op")}
+    )
+
+
+def test_spawns_anonymous_subtask():
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("spawns_anonymous_task", 2, {}),
+            ]
+        ),
+        Plan(
+            [
+                Directive("emit_event", 1, {"topic": "x", "value": 72, "_": 1}),
+                Directive("spawns_anonymous_task", 2, {}),
+            ]
+        ),
+        {"spawns_anonymous_task": error_on_rerun("spawns_anonymous_task")}
+        # "call_then_read": error_on_rerun("call_then_read")},
     )
 
 
