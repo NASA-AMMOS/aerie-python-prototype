@@ -344,7 +344,8 @@ def make_rbt(actions, accumulator=None):
             return RBT_NonRead(accumulator, RBT_Read(topics, function, ((res, make_rbt(rest)),)))
         else:
             return RBT_Read(topics, function, ((res, make_rbt(rest)),))
-
+    elif action == "yield":
+        return RBT_NonRead(accumulator + [(action, *action_args)], make_rbt(rest))
     else:
         return make_rbt(rest, accumulator + [(action, *action_args)])
 
@@ -362,6 +363,9 @@ def extend(rbt, actions):
         if action[0] == "read":
             actions.insert(0, action)
             break
+        elif action[0] == "yield":
+            nonreads.append(action)
+            return RBT_NonRead(nonreads, extend(rbt.rest, actions))
         else:
             nonreads.append(action)
 
