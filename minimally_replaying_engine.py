@@ -412,38 +412,34 @@ def task_replayer(engine: SimulationEngine, directive_type, args, action_log, im
     processed_reads = []
     # TODO use python's newfangled match
     while type(action_log) != RBT_Empty:
-        if type(action_log) == RBT_NonRead:
-            entry = action_log.payload
-            action = entry[0]
-            action_args = entry[1:]
-            if action == "emit":
-                topic, value = action_args
-                engine.current_task_frame.emit(topic, value)
-            elif action == "yield":
-                task_status, = action_args
-                yield task_status
-            elif action == "spawn":
-                child_directive_type, arguments = action_args
-                imitator.imitate_spawn(engine, child_directive_type, arguments)
-            else:
-                raise RuntimeError("Unhandled action type: " + action)
-            action_log = action_log.rest
-        elif type(action_log) == RBT_Read:
-            topics = action_log.topics
-            function = action_log.function
-            branches = action_log.branches
-            new_res = engine.current_task_frame.read(topics, function)
-            for old_res, branch in branches:
-                if old_res != new_res: continue
-                processed_reads.append(new_res)
-                action_log = branch
-                break
-            else:
-                # TODO: yield from instead of yield without resume
-                yield from step_up_task(register_engine, engine, directive_type, args, processed_reads, new_res)
-                return
-        else:
-            raise RuntimeError("Unhandled action log type: " + type(action_log))
+        match action_log:
+            case RBT_NonRead(entry, rest):
+                action, *action_args = entry
+                if action == "emit":
+                    topic, value = action_args
+                    engine.current_task_frame.emit(topic, value)
+                elif action == "yield":
+                    task_status, = action_args
+                    yield task_status
+                elif action == "spawn":
+                    child_directive_type, arguments = action_args
+                    imitator.imitate_spawn(engine, child_directive_type, arguments)
+                else:
+                    raise RuntimeError("Unhandled action type: " + action)
+                action_log = rest
+            case RBT_Read(topics, function, branches):
+                new_res = engine.current_task_frame.read(topics, function)
+                for old_res, branch in branches:
+                    if old_res != new_res: continue
+                    processed_reads.append(new_res)
+                    action_log = branch
+                    break
+                else:
+                    # TODO: yield from instead of yield without resume
+                    yield from step_up_task(register_engine, engine, directive_type, args, processed_reads, new_res)
+                    return
+            case _:
+                raise RuntimeError("Unhandled action log type: " + str(type(action_log)))
 
 
 def step_up_task(register_engine, engine, directive_type, arguments, reads, last_read):
