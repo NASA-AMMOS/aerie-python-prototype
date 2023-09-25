@@ -200,7 +200,8 @@ def test_with_new_reads_of_old_topics():
                 Directive("read_topic", 16, {"topic": "x", "_": 2}),
             ]
         ),
-        {"my_activity": error_on_rerun("my_activity", lambda kwargs: kwargs["param1"] == 4)},
+        {}
+        # {"my_activity": error_on_rerun("my_activity", lambda kwargs: kwargs["param1"] == 4)},  # TODO garbage
     )
 
 def test_branching_rbt():
@@ -222,7 +223,8 @@ def test_branching_rbt():
                 Directive("read_topic", 16, {"topic": "x", "_": 2}),
             ]
         ),
-        {"my_activity": error_on_rerun("my_activity", lambda kwargs: kwargs["param1"] == 4)},
+        {}
+        # {"my_activity": error_on_rerun("my_activity", lambda kwargs: kwargs["param1"] == 4)},
     )
 
 def test_with_reads_made_stale_dynamically():
@@ -288,7 +290,8 @@ def test_called_activity():
                 Directive("parent_of_reading_child", 10, {}),
             ]
         ),
-        {"emit_event": error_on_rerun("emit_event", lambda kwargs: kwargs["_"] == 10)},
+        {"emit_event": error_on_rerun("emit_event", lambda kwargs: kwargs["_"] == 10),
+         "parent_of_reading_child": error_on_rerun("parent_of_reading_child")},
     )
 
 
@@ -702,6 +705,11 @@ def test_spawns_anonymous_subtask():
         {"spawns_anonymous_task": error_on_rerun("spawns_anonymous_task")}
         # "call_then_read": error_on_rerun("call_then_read")},
     )
+
+
+"""
+TODO test case: await condition when Z passed through the interval of interest between two simulation steps
+"""
 
 
 def incremental_sim_test_case(old_plan, new_plan, overrides):

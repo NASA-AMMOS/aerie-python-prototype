@@ -19,10 +19,7 @@ class Register:
         self._initial_value = initial_value
 
     def get(self):
-        read = sim_engine.current_task_frame.read(self._topic, self.function)
-        if type(read) != int:
-            print()
-        return read
+        return sim_engine.current_task_frame.read(self._topic, self.function)
 
     def function(self, history):
         res = self._initial_value
