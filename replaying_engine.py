@@ -23,8 +23,13 @@ def fresh_task_id(label=""):
     __task_id_counter += 1
     return TaskId(__task_id_counter, label)
 
+def fresh_anonymous_task_name(label=""):
+    global __task_id_counter
+    __task_id_counter += 1
+    return f"ANONYMOUS({__task_id_counter}){' ' + label if label != '' else ''}"
+
 class SimulationEngine:
-    def __init__(self, register_engine, action_log=None):
+    def __init__(self, register_engine, action_log=None, anonymous_tasks=None):
         self.action_log = ActionLog(self, action_log)
         self.elapsed_time = 0
         self.events = []  # list of tuples (start_offset, event_graph)
@@ -40,6 +45,9 @@ class SimulationEngine:
         self.spans = []
         self.tasks = {}
         self.register_engine = register_engine
+        if anonymous_tasks is None:
+            anonymous_tasks = {}
+        self.anonymous_tasks = anonymous_tasks
 
     def register_model(self, cls):
         self.model = cls()
@@ -48,8 +56,8 @@ class SimulationEngine:
 
     def spawn(self, directive_type, arguments):
         task_id = fresh_task_id(str(directive_type) + " " + str(arguments))
-        self.make_task(task_id, directive_type, arguments)
-        task = make_task(self.model, directive_type, arguments)
+        task = self.make_task(task_id, directive_type, arguments)
+        # task = make_task(self.model, directive_type, arguments)
         self.current_task_frame.action_log.spawn(self.current_task_frame.task_id, directive_type, arguments)
         self.tasks[task_id] = task
         self.task_inputs[task_id] = (directive_type, arguments)
@@ -60,10 +68,12 @@ class SimulationEngine:
     def spawn_anonymous(self, task_factory):
         task = task_factory()
         task_id = fresh_task_id(repr(task))
-        self.current_task_frame.action_log.spawn(self.current_task_frame.task_id, "unknown", {})
+        task_name = fresh_anonymous_task_name()
+        self.current_task_frame.action_log.spawn(self.current_task_frame.task_id, task_name, {})
+        self.anonymous_tasks[task_name] = task_factory
         self.tasks[task_id] = task
-        self.task_inputs[task_id] = ("unknown", {})
-        self.task_directives[task_id] = Directive("unknown", self.elapsed_time, {})
+        self.task_inputs[task_id] = (task_name, {})
+        self.task_directives[task_id] = Directive(task_name, self.elapsed_time, {})
         self.spawn_task(task_id, task)
         return task_id
 
@@ -121,8 +131,12 @@ class SimulationEngine:
         return task_status, self.current_task_frame.collect()
 
     def make_task(self, task_id, directive_type, args):
+        if "ANONYMOUS" in directive_type:
+            print()
         if self.action_log.contains_key(directive_type, args):
             return task_replayer(self, task_id, directive_type, args, self.action_log.get(directive_type, args), Imitator(self.action_log, self.register_engine), self.register_engine)
+        elif directive_type in self.anonymous_tasks:
+            return self.anonymous_tasks[directive_type]()
         else:
             return make_task(self.model, directive_type, args)
 
@@ -260,8 +274,8 @@ class JobSchedule:
         return len(self._schedule) == 0
 
 
-def simulate(register_engine, model_class, plan, action_log=None):
-    engine = SimulationEngine(register_engine, action_log=action_log)
+def simulate(register_engine, model_class, plan, action_log=None, anonymous_tasks=None):
+    engine = SimulationEngine(register_engine, action_log=action_log, anonymous_tasks=anonymous_tasks)
     engine.register_model(model_class)
     register_engine(engine)
 
@@ -296,7 +310,8 @@ def simulate(register_engine, model_class, plan, action_log=None):
 
 
     return sorted(engine.spans, key=lambda x: (x[1], x[2])), list(engine.events), {
-        "action_log": engine.action_log
+        "action_log": engine.action_log,
+        "anonymous_tasks": engine.anonymous_tasks
     }
 
 
@@ -343,7 +358,7 @@ def extend(rbt, actions):
 
 
 def simulate_incremental(register_engine, model_class, new_plan, old_plan, payload):
-    return simulate(register_engine, model_class, new_plan, action_log=payload["action_log"])
+    return simulate(register_engine, model_class, new_plan, action_log=payload["action_log"], anonymous_tasks=payload["anonymous_tasks"])
 
 
 class Imitator:
@@ -395,11 +410,10 @@ def task_replayer(engine: SimulationEngine, task_id, directive_type, args, actio
                 engine.current_task_frame.emit(topic, value)
             elif action == "yield":
                 task_status, = action_args
-                yield task_status  # TODO if task status is call - make sure the engine tries to look up known tasks before running
+                yield task_status
             elif action == "spawn":
-                directive_type, arguments = action_args
-                imitator.imitate_spawn(engine, directive_type, arguments)
-                # engine.spawn(directive_type, arguments)
+                child_directive_type, arguments = action_args
+                imitator.imitate_spawn(engine, child_directive_type, arguments)
             else:
                 raise RuntimeError("Unhandled action type: " + action)
             action_log = action_log.rest
@@ -415,6 +429,7 @@ def task_replayer(engine: SimulationEngine, task_id, directive_type, args, actio
                     break
             else:
                 yield step_up_task(register_engine, engine, task_id, directive_type, args, processed_reads, new_res)
+                raise RuntimeError("This task should never resume")
         else:
             raise RuntimeError("Unhandled action log type: " + type(action_log))
 
@@ -422,7 +437,10 @@ def task_replayer(engine: SimulationEngine, task_id, directive_type, args, actio
 def step_up_task(register_engine, engine, task_id, directive_type, arguments, reads, last_read):
     temp_engine = ReplayingSimulationEngine(engine)
     register_engine(temp_engine)
-    task = make_task(engine.model, directive_type, arguments)
+    if directive_type in engine.anonymous_tasks:
+        task = engine.anonymous_tasks[directive_type]()
+    else:
+        task = make_task(engine.model, directive_type, arguments)
     engine.tasks[task_id] = task
     task_status = temp_engine.step_up(task, reads, last_read)
     register_engine(engine)  # restore main engine

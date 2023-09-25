@@ -716,8 +716,8 @@ def incremental_sim_test_case(old_plan, new_plan, overrides):
         """
         expected_old_spans, expected_old_sim_events, _ = sim.simulate(register_engine, model.Model, old_plan)
         assert [(x, sim.EventGraph.to_string(y)) for x, y in events_1] == [(x, sim.EventGraph.to_string(y)) for x, y in expected_old_sim_events]
-        assert set((hashable_directive(x), y, z) for x, y, z in spans_1) == set(
-            (hashable_directive(x), y, z) for x, y, z in expected_old_spans)
+        assert set((hashable_directive(rename(x)), y, z) for x, y, z in spans_1) == set(
+            (hashable_directive(rename(x)), y, z) for x, y, z in expected_old_spans)
     _()
 
     expected_spans, expected_sim_events, _ = sim.simulate(register_engine, model.Model, new_plan)
@@ -743,7 +743,16 @@ def incremental_sim_test_case(old_plan, new_plan, overrides):
     print("Actual   :", actual)
 
     assert actual == expected
-    assert set((hashable_directive(x), y, z) for x, y, z in actual_spans) == set((hashable_directive(x), y, z) for x, y, z in expected_spans)
+    actual_spans_processed = set((hashable_directive(rename(x)), y, z) for x, y, z in actual_spans)
+    expected_spans_processed = set((hashable_directive(rename(x)), y, z) for x, y, z in expected_spans)
+    assert actual_spans_processed == expected_spans_processed
+
+
+def rename(directive: Directive):
+    type = directive.type
+    if "ANONYMOUS" in type:
+        type = "unknown"
+    return Directive(type, directive.start_time, directive.args)
 
 
 if __name__ == "__main__":

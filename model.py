@@ -215,13 +215,15 @@ def spawns_anonymous_task(model):
     spawn_anonymous(my_anonymous_task(model, 1))
     yield Delay(2)
     x = model.x.get()
-    model.y.set(x * 100)
+    res = x * 100
+    model.y.set(res)
 
 
 def my_anonymous_task(model, delay):
     def task():
         yield Delay(delay)
         x = model.x.get()
+        model.x.set(55)
         model.y.set(x + 1)
     return task
 
