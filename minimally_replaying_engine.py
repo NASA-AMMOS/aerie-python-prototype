@@ -330,25 +330,49 @@ RBT_NonRead = namedtuple("RBT_NonRead", "payload rest")
 RBT_Read = namedtuple("RBT_Read", "topics function branches")
 
 
-def make_rbt(actions):
+def make_rbt(actions, accumulator=None):
+    if accumulator is None: accumulator = []
     if not actions:
-        return RBT_Empty()
-    first, rest = actions[0], actions[1:]
-    action, action_args = first[0], first[1:]
+        if accumulator:
+            return RBT_NonRead(accumulator, RBT_Empty())
+        else:
+            return RBT_Empty()
+    (action, *action_args), *rest = actions
     if action == "read":
         topics, function, res = action_args
-        return RBT_Read(topics, function, ((res, make_rbt(rest)),))
+        if accumulator:
+            return RBT_NonRead(accumulator, RBT_Read(topics, function, ((res, make_rbt(rest)),)))
+        else:
+            return RBT_Read(topics, function, ((res, make_rbt(rest)),))
+
     else:
-        return RBT_NonRead(first, make_rbt(rest))
+        return make_rbt(rest, accumulator + [(action, *action_args)])
 
 
 def extend(rbt, actions):
+    if type(rbt) == RBT_Empty:
+        return make_rbt(actions)
     if not actions:
         return rbt
-    first, rest = actions[0], actions[1:]
-    action, action_args = first[0], first[1:]
-    if action == "read":
+
+    nonreads = []
+    actions = list(actions)
+    while actions:
+        action = actions.pop(0)
+        if action[0] == "read":
+            actions.insert(0, action)
+            break
+        else:
+            nonreads.append(action)
+
+    if nonreads:
+        assert type(rbt) == RBT_NonRead
+        return RBT_NonRead(nonreads, extend(rbt.rest, actions))
+
+    if actions:
         assert type(rbt) == RBT_Read
+        first, *rest = actions
+        action, *action_args = first
         topics, function, res = action_args
         assert rbt.topics == topics
         new_branches = list()
@@ -362,6 +386,12 @@ def extend(rbt, actions):
         if not found_match:
             new_branches.append((res, make_rbt(rest)))
         return RBT_Read(topics, function, tuple(new_branches))
+
+    first, *rest = actions[0], actions[1:]
+    action, action_args = first[0], first[1:]
+    if action == "read":
+        assert type(rbt) == RBT_Read
+
     else:
         assert type(rbt) == RBT_NonRead
         return RBT_NonRead(first, extend(rbt.rest, rest))
@@ -413,20 +443,21 @@ def task_replayer(engine: SimulationEngine, directive_type, args, action_log, im
     # TODO use python's newfangled match
     while type(action_log) != RBT_Empty:
         match action_log:
-            case RBT_NonRead(entry, rest):
-                action, *action_args = entry
-                if action == "emit":
-                    topic, value = action_args
-                    engine.current_task_frame.emit(topic, value)
-                elif action == "yield":
-                    task_status, = action_args
-                    yield task_status
-                elif action == "spawn":
-                    child_directive_type, arguments = action_args
-                    imitator.imitate_spawn(engine, child_directive_type, arguments)
-                else:
-                    raise RuntimeError("Unhandled action type: " + action)
-                action_log = rest
+            case RBT_NonRead(entries, rest):
+                for entry in entries:
+                    action, *action_args = entry
+                    if action == "emit":
+                        topic, value = action_args
+                        engine.current_task_frame.emit(topic, value)
+                    elif action == "yield":
+                        task_status, = action_args
+                        yield task_status
+                    elif action == "spawn":
+                        child_directive_type, arguments = action_args
+                        imitator.imitate_spawn(engine, child_directive_type, arguments)
+                    else:
+                        raise RuntimeError("Unhandled action type: " + action)
+                    action_log = rest
             case RBT_Read(topics, function, branches):
                 new_res = engine.current_task_frame.read(topics, function)
                 for old_res, branch in branches:
