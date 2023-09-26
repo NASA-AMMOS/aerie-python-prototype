@@ -70,14 +70,13 @@ class SimulationEngine:
         return self.model
 
     def spawn(self, directive_type, arguments):
-        task_id = fresh_task_id(str(directive_type) + " " + str(arguments))
-        task = self.make_task(task_id, directive_type, arguments)
         self.current_task_frame.action_log.spawn(self.current_task_frame.task_id, directive_type, arguments)
-        self.tasks[task_id] = task
-        self.task_inputs[task_id] = (directive_type, arguments)
-        self.task_directives[task_id] = Directive(directive_type, self.elapsed_time, arguments)
+        task_id = fresh_task_id(str(directive_type) + " " + str(arguments))
         self.task_start_times[task_id] = self.elapsed_time
-        self.spawn_task(task_id, task)
+        self.task_directives[task_id] = Directive(directive_type, self.elapsed_time, arguments)
+        self.make_task(task_id, directive_type, arguments)
+
+        self.step_child_task(task_id, self.tasks[task_id])
         return task_id
 
     def spawn_anonymous(self, task_factory):
@@ -90,10 +89,10 @@ class SimulationEngine:
         self.task_inputs[task_id] = (task_name, {})
         self.task_directives[task_id] = Directive(task_name, self.elapsed_time, {})
         self.task_start_times[task_id] = self.elapsed_time
-        self.spawn_task(task_id, task)
+        self.step_child_task(task_id, task)
         return task_id
 
-    def spawn_task(self, task_id, task):
+    def step_child_task(self, task_id, task):
         parent_task_frame = self.current_task_frame
         task_status, events = self.step(task_id, task)
         parent_task_frame.record_spawned_child(events)
@@ -101,13 +100,12 @@ class SimulationEngine:
 
     def defer(self, directive_type, duration, arguments):
         task_id = fresh_task_id(repr((directive_type, arguments)))
-        task = self.make_task(task_id, directive_type, arguments)
         self.schedule.schedule(self.elapsed_time + duration, task_id)
-        self.task_start_times[task_id] = self.elapsed_time + duration
-        self.task_inputs[task_id] = (directive_type, arguments)
         self.task_directives[task_id] = Directive(directive_type, self.elapsed_time + duration, arguments)
-        self.tasks[task_id] = task
-        return task_id, task
+        self.task_start_times[task_id] = self.elapsed_time + duration
+        self.make_task(task_id, directive_type, arguments)
+
+        return task_id, self.tasks[task_id]
 
     def step(self, task_id, task):
         self.current_task_frame = TaskFrame(self.elapsed_time, self.action_log, task_id=task_id, history=self.current_task_frame.get_visible_history())
@@ -134,25 +132,25 @@ class SimulationEngine:
                 del self.awaiting_tasks[task_id]
         elif type(task_status) == Call:
             child_task_id = fresh_task_id(repr((task_status.child_task, task_status.args)))
-            child_task = self.make_task(child_task_id, task_status.child_task, task_status.args)
-            self.tasks[child_task_id] = child_task
             self.awaiting_tasks[child_task_id] = task_id
-            self.task_inputs[child_task_id] = (task_status.child_task, task_status.args)
             self.task_directives[child_task_id] = Directive(task_status.child_task, self.elapsed_time, task_status.args)
             self.task_start_times[child_task_id] = self.elapsed_time
-            self.spawn_task(child_task_id, child_task)
+
+            self.make_task(child_task_id, task_status.child_task, task_status.args)
+            self.step_child_task(child_task_id, self.tasks[child_task_id])
         else:
             raise ValueError("Unhandled task status: " + str(task_status))
         self.action_log.yield_(task_id, task_status)
         return task_status, self.current_task_frame.collect()
 
     def make_task(self, task_id, directive_type, args):
+        self.task_inputs[task_id] = (directive_type, args)
         if self.action_log.contains_key(directive_type, args):
-            return task_replayer(self, directive_type, args, self.action_log.get(directive_type, args), Doppelganger(self.action_log, self.register_engine), self.register_engine)
+            self.tasks[task_id] = task_replayer(self, directive_type, args, self.action_log.get(directive_type, args), Doppelganger(self.action_log, self.register_engine), self.register_engine)
         elif directive_type in self.anonymous_tasks:  # oxymoron
-            return self.anonymous_tasks[directive_type]()
+            self.tasks[task_id] = self.anonymous_tasks[directive_type]()
         else:
-            return make_task(self.model, directive_type, args)
+            self.tasks[task_id] = make_task(self.model, directive_type, args)
 
 class ActionLog:
     def __init__(self, engine, old_action_log):
