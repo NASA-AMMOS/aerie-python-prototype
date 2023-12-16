@@ -300,9 +300,12 @@ def simulate(register_engine, model_class, plan, action_log=None, anonymous_task
         resume_time = engine.schedule.peek_next_time()
         engine.elapsed_time = resume_time
         batch_event_graph = EventGraph.empty()
+        saved_task_frame = engine.current_task_frame
         for task_id in engine.schedule.get_next_batch():
+            engine.current_task_frame = saved_task_frame
             task_status, event_graph = engine.step(task_id, engine.tasks[task_id])
             batch_event_graph = EventGraph.concurrently(batch_event_graph, event_graph)
+        engine.current_task_frame = TaskFrame(engine.elapsed_time, engine.action_log, history=engine.events)
         if type(batch_event_graph) != EventGraph.Empty:
             if engine.events and engine.events[-1][0] == engine.elapsed_time:
                 engine.events[-1] = (engine.elapsed_time, EventGraph.sequentially(engine.events[-1][1], batch_event_graph))
@@ -310,7 +313,6 @@ def simulate(register_engine, model_class, plan, action_log=None, anonymous_task
                 engine.events.append((engine.elapsed_time, batch_event_graph))
         old_awaiting_conditions = engine.awaiting_conditions
         engine.awaiting_conditions = []
-        engine.current_task_frame = TaskFrame(engine.elapsed_time, engine.action_log, history=engine.events)
         for condition, task_id in old_awaiting_conditions:
             time_to_wake_task = condition(True, 0, 9999)
             if time_to_wake_task is not None:

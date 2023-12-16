@@ -97,6 +97,9 @@ class SimulationEngine:
         return task_id
 
     def step_child_task(self, task_id, task):
+        """
+        callee saves current_task_frame
+        """
         parent_task_frame = self.current_task_frame
         task_status, events = self.step(task_id, task)
         parent_task_frame.record_spawned_child(events)
@@ -113,6 +116,9 @@ class SimulationEngine:
         self.make_task(task_id, directive_type, arguments)
 
     def step(self, task_id, task):
+        """
+        caller saves current_task_frame
+        """
         self.current_task_frame = TaskFrame(self.elapsed_time, self.action_log, task_id=task_id, history=self.current_task_frame.get_visible_history())
         try:
             task_status = next(task)
@@ -227,13 +233,17 @@ class TaskFrame:
         self.branches = []
         self.elapsed_time = elapsed_time
         self.action_log = action_log
+        self.read_topics = set()
+        self.emitted_topics = set()
 
     def emit(self, topic, value):
+        self.emitted_topics.add(topic)
         self.action_log.emit(self.task_id, topic, value)
         self.tip = EventGraph.sequentially(self.tip, EventGraph.Atom(Event(topic, value)))
 
     def read(self, topic_or_topics, function):
         topics = [topic_or_topics] if type(topic_or_topics) != list else topic_or_topics
+        self.read_topics.update(topics)
         res = []
         for start_offset, x in self.get_visible_history():
             filtered = EventGraph.filter(x, topics)
@@ -306,13 +316,16 @@ def simulate(register_engine, model_class, plan, action_log=None, anonymous_task
         resume_time = engine.schedule.peek_next_time()
         engine.elapsed_time = resume_time
         batch_event_graph = EventGraph.empty()
+        saved_task_frame = engine.current_task_frame
         for task_id in engine.schedule.get_next_batch():
+            engine.current_task_frame = saved_task_frame
             if task_id in engine.tasks:
                 task_status, event_graph = engine.step(task_id, engine.tasks[task_id])
             else:
                 engine.step_imitating_task(task_id)
                 event_graph = engine.current_task_frame.collect()
             batch_event_graph = EventGraph.concurrently(batch_event_graph, event_graph)
+        engine.current_task_frame = saved_task_frame
         if type(batch_event_graph) != EventGraph.Empty:
             if engine.events and engine.events[-1][0] == engine.elapsed_time:
                 engine.events[-1] = (engine.elapsed_time, EventGraph.sequentially(engine.events[-1][1], batch_event_graph))
@@ -322,7 +335,9 @@ def simulate(register_engine, model_class, plan, action_log=None, anonymous_task
         engine.awaiting_conditions = []
         engine.current_task_frame = TaskFrame(engine.elapsed_time, engine.action_log, history=engine.events)
         for condition, task_id in old_awaiting_conditions:
+            engine.current_task_frame = TaskFrame(engine.elapsed_time, engine.action_log, history=engine.events)
             time_to_wake_task = condition(True, 0, 9999)
+            # print(engine.current_task_frame.read_topics)
             if time_to_wake_task is not None:
                 engine.schedule.schedule(engine.elapsed_time + time_to_wake_task, task_id)
             else:

@@ -179,9 +179,12 @@ def simulate(register_engine, model_class, plan):
         resume_time = engine.schedule.peek_next_time()
         engine.elapsed_time = resume_time
         batch_event_graph = EventGraph.empty()
+        saved_task_frame = engine.current_task_frame
         for task in engine.schedule.get_next_batch():
+            engine.current_task_frame = saved_task_frame
             task_status, event_graph = engine.step(task)
             batch_event_graph = EventGraph.concurrently(batch_event_graph, event_graph)
+        engine.current_task_frame = TaskFrame(engine.elapsed_time, history=engine.events)
         if type(batch_event_graph) != EventGraph.Empty:
             if engine.events and engine.events[-1][0] == engine.elapsed_time:
                 engine.events[-1] = (engine.elapsed_time, EventGraph.sequentially(engine.events[-1][1], batch_event_graph))
