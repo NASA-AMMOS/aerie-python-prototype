@@ -312,8 +312,9 @@ def simulate(register_engine, model_class, plan, action_log=None, anonymous_task
         engine.awaiting_conditions = []
         engine.current_task_frame = TaskFrame(engine.elapsed_time, engine.action_log, history=engine.events)
         for condition, task_id in old_awaiting_conditions:
-            if condition():
-                engine.schedule.schedule(engine.elapsed_time, task_id)
+            time_to_wake_task = condition(True, 0, 9999)
+            if time_to_wake_task is not None:
+                engine.schedule.schedule(engine.elapsed_time + time_to_wake_task, task_id)
             else:
                 engine.awaiting_conditions.append((condition, task_id))
 
