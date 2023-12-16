@@ -34,29 +34,31 @@ class EventGraph:
 
     @staticmethod
     def to_string(event_graph, parent=None, use_str=False):
-        if type(event_graph) == EventGraph.Empty:
-            return ""
-        if type(event_graph) == EventGraph.Atom:
-            if use_str:
-                return builtins.str(event_graph.value)
-            else:
-                return f"{event_graph.value.topic}={event_graph.value.value}"
-        if type(event_graph) == EventGraph.Sequentially:
-            res = f"{EventGraph.to_string(event_graph.prefix, parent=type(event_graph), use_str=use_str)};{EventGraph.to_string(event_graph.suffix, parent=type(event_graph), use_str=use_str)}"
-            if parent == EventGraph.Concurrently:
-                return f"({res})"
-            else:
-                return res
-        if type(event_graph) == EventGraph.Concurrently:
-            left_str = EventGraph.to_string(event_graph.left, parent=type(event_graph), use_str=use_str)
-            right_str = EventGraph.to_string(event_graph.right, parent=type(event_graph), use_str=use_str)
-            left_str, right_str = sorted([left_str, right_str])
-            res = f"{left_str}|{right_str}"
-            if parent == EventGraph.Sequentially:
-                return f"({res})"
-            else:
-                return res
-        return use_str(event_graph)
+        match event_graph:
+            case EventGraph.Empty():
+                return ""
+            case EventGraph.Atom(value):
+                if use_str:
+                    return builtins.str(value)
+                else:
+                    return f"{value.topic}={value.value}"
+            case EventGraph.Sequentially(prefix, suffix):
+                res = f"{EventGraph.to_string(prefix, parent=type(event_graph), use_str=use_str)};{EventGraph.to_string(suffix, parent=EventGraph.Sequentially, use_str=use_str)}"
+                if parent == EventGraph.Concurrently:
+                    return f"({res})"
+                else:
+                    return res
+            case EventGraph.Concurrently(left, right):
+                left_str = EventGraph.to_string(left, parent=EventGraph.Concurrently, use_str=use_str)
+                right_str = EventGraph.to_string(right, parent=EventGraph.Concurrently, use_str=use_str)
+                left_str, right_str = sorted([left_str, right_str])
+                res = f"{left_str}|{right_str}"
+                if parent == EventGraph.Sequentially:
+                    return f"({res})"
+                else:
+                    return res
+            case _:
+                return builtins.str(event_graph)
 
     @staticmethod
     def iter(event_graph):

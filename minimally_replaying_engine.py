@@ -328,8 +328,6 @@ def simulate(register_engine, model_class, plan, action_log=None, anonymous_task
             else:
                 engine.awaiting_conditions.append((condition, task_id))
 
-
-
     return sorted(engine.spans, key=lambda x: (x[1], x[2])), list(engine.events), {
         "action_log": engine.action_log,
         "anonymous_tasks": engine.anonymous_tasks
@@ -342,90 +340,110 @@ RBT_Read = namedtuple("RBT_Read", "topics function branches")
 
 
 def make_rbt(actions, accumulator=None):
-    event_graph = None
     if accumulator is None: accumulator = []
+
+    # Handle base case
     if not actions:
         if accumulator:
-            return RBT_NonRead(accumulator, event_graph, RBT_Empty())
+            return RBT_NonRead(accumulator, make_event_graph(accumulator), RBT_Empty())
         else:
             return RBT_Empty()
+
+    # We have at least one action
     (action, *action_args), *rest = actions
+
     if action == "read":
         topics, function, res = action_args
         if accumulator:
-            return RBT_NonRead(accumulator, event_graph, RBT_Read(topics, function, ((res, make_rbt(rest)),)))
+            return RBT_NonRead(accumulator, make_event_graph(accumulator), RBT_Read(topics, function, ((res, make_rbt(rest)),)))
         else:
             return RBT_Read(topics, function, ((res, make_rbt(rest)),))
-    elif action == "yield":
-        return RBT_NonRead(accumulator + [(action, *action_args)], event_graph, make_rbt(rest))
     else:
-        return make_rbt(rest, accumulator + [(action, *action_args)])
+        accumulator = accumulator + [(action, *action_args)]
+        if action == "yield":
+            return RBT_NonRead(accumulator, make_event_graph(accumulator), make_rbt(rest))
+        else:
+            return make_rbt(rest, accumulator)
 
+"""
+Given an existing rbt, and a set of compatible actions, propagate the rbt using the given actions
 
+Precondition: The rbt must be compatible with the given actions. Let RD be the first differing read in the
+list of actions. Every action prior to RD must already be represented in the rbt.
+"""
 def extend(rbt, actions):
-    if type(rbt) == RBT_Empty:
-        return make_rbt(actions)
+    # If the set of actions is empty, it is trivially compatible with this rbt. No propagation is necessary.
     if not actions:
         return rbt
 
-    nonreads = []
-    actions = list(actions)
-    event_graph = None
-    while actions:
-        action = actions.pop(0)
-        if action[0] == "read":
-            actions.insert(0, action)
-            break
-        elif action[0] == "yield":
-            nonreads.append(action)
-            return RBT_NonRead(nonreads, event_graph, extend(rbt.rest, actions))
-        else:
-            nonreads.append(action)
+    # If the rbt is empty, the set of actions is also trivially compatible.
+    # Delegate to make_rbt to create a brand new rbt.
+    match rbt:
+        case RBT_Empty():
+            return make_rbt(actions)
 
-    if nonreads:
-        assert type(rbt) == RBT_NonRead
-        return RBT_NonRead(nonreads, event_graph, extend(rbt.rest, actions))
+        case RBT_NonRead(rbt_actions, rbt_event_graph, rbt_rest):
+            expected_nonreads = list(rbt_actions)
 
-    if actions:
-        assert type(rbt) == RBT_Read
-        first, *rest = actions
-        action, *action_args = first
-        topics, function, res = action_args
-        assert rbt.topics == topics
-        new_branches = list()
-        found_match = False
-        for old_res, old_rbt in rbt.branches:
-            if old_res == res:
-                found_match = True
-                new_branches.append((old_res, extend(old_rbt, rest)))
-            else:
-                new_branches.append((old_res, old_rbt))
-        if not found_match:
-            new_branches.append((res, make_rbt(rest)))
-        return RBT_Read(topics, function, tuple(new_branches))
+            # If neither the rbt nor the actions are empty, traverse both up until the next read or yield, or the actions are exhausted
+            nonreads = []
+            actions = list(actions)
+            while actions:
+                if actions[0][0] == "read":
+                    break
+                elif actions[0][0] == "yield":
+                    nonreads.append(actions.pop(0))
+                    return RBT_NonRead(nonreads, make_event_graph(nonreads), extend(rbt_rest, actions))
+                else:
+                    assert actions[0] == expected_nonreads.pop(0)
+                    nonreads.append(actions.pop(0))
 
-    first, *rest = actions[0], actions[1:]
-    action, action_args = first[0], first[1:]
-    if action == "read":
-        assert type(rbt) == RBT_Read
+            # We reach here if either a read was found, or the list of actions was exhausted
+            if expected_nonreads and actions:
+                raise RuntimeError("Not all nonreads were exhausted! " + str(rbt.actions) + ":::" + str(actions))
+            if nonreads:
+                return RBT_NonRead(nonreads, make_event_graph(nonreads), extend(rbt.rest, actions))
+            raise RuntimeError("Does this ever happen?")
 
-    else:
-        assert type(rbt) == RBT_NonRead
-        return RBT_NonRead(first, event_graph, extend(rbt.rest, rest))
+        case RBT_Read(_, _, _):
+            first, *rest = actions
+            action, topics, function, res = first
+            assert rbt.topics == topics  # The read query must be identical. The response may or may not be.
 
+            branches = []
+            found_match = False
 
-def make_event_graph(actions, action_log):
+            for old_res, old_rbt in rbt.branches:
+                if old_res == res:
+                    found_match = True
+                    branches.append((old_res, extend(old_rbt, rest)))
+                else:
+                    branches.append((old_res, old_rbt))
+
+            if not found_match:
+                # We've never seen this read before! We're in uncharted territory; mint a new rbt with make_rbt.
+                branches.append((res, make_rbt(rest)))
+            return RBT_Read(topics, function, tuple(branches))
+
+        case _:
+            raise RuntimeError("Non-exhaustive match: " + rbt)
+
+def make_event_graph(actions):
     event_graph = EventGraph.empty()
+    seen_yield = False
     for action, *action_args in reversed(actions):
-        if action == "emit":
+        if action == "yield":
+            if seen_yield: raise RuntimeError("Double yield in actions " + str(actions))
+            seen_yield = True
+        elif action == "emit":
             topic, value = action_args
             event_graph = EventGraph.sequentially(EventGraph.atom(Event(topic, value)), event_graph)
         elif action == "spawn":
             child_directive_type, arguments = action_args
-            # TODO
-            event_graph = EventGraph.concurrently(event_graph, make_event_graph(action_log["child_directive_type"], action_log))
-
-
+            event_graph = EventGraph.concurrently(event_graph, "spawned " + child_directive_type + " with args " + str(arguments))#make_event_graph(action_log[child_directive_type], action_log))
+        else:
+            raise RuntimeError("Unhandled action type: " + action)
+    return event_graph
 
 
 def simulate_incremental(register_engine, model_class, new_plan, old_plan, payload):
@@ -439,6 +457,7 @@ def task_replayer(engine: SimulationEngine, task_id, directive_type, args, actio
             case RBT_Empty():
                 break
             case RBT_NonRead(entries, event_graph, rest):
+                # engine.current_task_frame.emit_all(event_graph)
                 for entry in entries:
                     action, *action_args = entry
                     if action == "emit":
