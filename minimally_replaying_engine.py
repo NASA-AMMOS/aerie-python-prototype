@@ -59,7 +59,8 @@ class SimulationEngine:
         self.task_start_times = {}
         self.task_directives = {}
         self.task_inputs = {}
-        self.awaiting_conditions = []
+        self.awaiting_conditions = Subscriptions()
+        self.signaled_conditions = []
         self.awaiting_tasks = {}  # map from blocking task to blocked task
         self.spans = []
         self.tasks = {}
@@ -117,12 +118,13 @@ class SimulationEngine:
         callee saves current_task_frame
         """
         parent_task_frame = self.current_task_frame
-        task_status, events = self.step(task_id, task)
+        task_status, emitted_topics, events = self.step(task_id, task)
         parent_task_frame.record_spawned_child(events)
         self.current_task_frame = parent_task_frame
+        return emitted_topics
 
     def step_imitating_task(self, task_id):
-        self.step_child_task(task_id, self.imitating_tasks[task_id])
+        return self.step_child_task(task_id, self.imitating_tasks[task_id])
 
     def defer(self, directive_type, duration, arguments):
         task_id = fresh_task_id(repr((directive_type, arguments)))
@@ -148,7 +150,7 @@ class SimulationEngine:
             case Delay(duration):
                 self.schedule.schedule(self.elapsed_time + duration, task_id)
             case AwaitCondition(condition):
-                self.awaiting_conditions.append((condition, task_id))
+                self.signaled_conditions.append((condition, task_id))
             case Completed():
                 self.spans.append(
                     (
@@ -176,7 +178,7 @@ class SimulationEngine:
             case _:
                 raise ValueError("Unhandled task status: " + str(task_status))
 
-        return task_status, self.current_task_frame.collect()
+        return task_status, set(self.current_task_frame.emitted_topics), self.current_task_frame.collect()
 
     def make_task(self, task_id, directive_type, args):
         """
@@ -271,7 +273,7 @@ class TaskFrame:
         res = []
         for start_offset, x in self.get_visible_history():
             filtered = EventGraph.filter(x, topics)
-            if type(filtered) != EventGraph.Empty:
+            if not EventGraph.is_empty(filtered):
                 res.append((start_offset, filtered))
         res = function(res)
         self.action_log.read(self.task_id, topics, function, res)
@@ -328,6 +330,30 @@ class JobSchedule:
         return len(self._schedule) == 0
 
 
+class Subscriptions:
+    def __init__(self):
+        self.subcribers_by_topics = {}
+
+    def subscribe(self, topics, new_subscriber):
+        for topic in topics:
+            if topic not in self.subcribers_by_topics:
+                self.subcribers_by_topics[topic] = set()
+            self.subcribers_by_topics[topic].add(new_subscriber)
+
+    def unsubscribe(self, subscriber):
+        for subscribers in self.subcribers_by_topics.values():
+            subscribers.remove(subscriber)
+
+    def invalidate(self, topics):
+        result = set()
+        for topic in topics:
+            if not topic in self.subcribers_by_topics: continue
+            result.update(self.subcribers_by_topics[topic])
+            del self.subcribers_by_topics[topic]
+        return result
+
+
+
 def simulate(register_engine, model_class, plan, action_log=None, anonymous_tasks=None):
     engine = SimulationEngine(register_engine, action_log=action_log, anonymous_tasks=anonymous_tasks)
     engine.register_model(model_class)
@@ -341,31 +367,36 @@ def simulate(register_engine, model_class, plan, action_log=None, anonymous_task
         engine.elapsed_time = resume_time
         batch_event_graph = EventGraph.empty()
         saved_task_frame = engine.current_task_frame
+        emitted_topics = set()
         for task_id in engine.schedule.get_next_batch():
             engine.current_task_frame = saved_task_frame
             if task_id in engine.tasks:
-                task_status, event_graph = engine.step(task_id, engine.tasks[task_id])
+                task_status, newly_emitted_topics, event_graph = engine.step(task_id, engine.tasks[task_id])
+                emitted_topics.update(newly_emitted_topics)
             else:
-                engine.step_imitating_task(task_id)
+                emitted_topics.update(engine.step_imitating_task(task_id))
                 event_graph = engine.current_task_frame.collect()
             batch_event_graph = EventGraph.concurrently(batch_event_graph, event_graph)
         engine.current_task_frame = saved_task_frame
-        if type(batch_event_graph) != EventGraph.Empty:
+
+        # At this point, emitted_topics contains all invalidated topics
+        if emitted_topics and engine.awaiting_conditions.subcribers_by_topics:
+            engine.signaled_conditions.extend(engine.awaiting_conditions.invalidate(emitted_topics))
+
+        if not EventGraph.is_empty(batch_event_graph):
             if engine.events and engine.events[-1][0] == engine.elapsed_time:
                 engine.events[-1] = (engine.elapsed_time, EventGraph.sequentially(engine.events[-1][1], batch_event_graph))
             else:
                 engine.events.append((engine.elapsed_time, batch_event_graph))
-        old_awaiting_conditions = engine.awaiting_conditions
-        engine.awaiting_conditions = []
         engine.current_task_frame = TaskFrame(engine.elapsed_time, engine.action_log, history=engine.events)
-        for condition, task_id in old_awaiting_conditions:
+        for condition, task_id in engine.signaled_conditions:
             engine.current_task_frame = TaskFrame(engine.elapsed_time, engine.action_log, history=engine.events)
             time_to_wake_task = condition(True, 0, 9999)
-            # print(engine.current_task_frame.read_topics)
             if time_to_wake_task is not None:
                 engine.schedule.schedule(engine.elapsed_time + time_to_wake_task, task_id)
             else:
-                engine.awaiting_conditions.append((condition, task_id))
+                engine.awaiting_conditions.subscribe(engine.current_task_frame.read_topics, (condition, task_id))
+        engine.signaled_conditions.clear()
 
     return sorted(engine.spans, key=lambda x: (x[1], x[2])), list(engine.events), {
         "action_log": engine.action_log,

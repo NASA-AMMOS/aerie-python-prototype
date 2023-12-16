@@ -238,6 +238,18 @@ def condition_becomes_true_with_no_steps(model):
     model.x.set(model.z.get())
 
 
+def set_z(model, value, rate):
+    import sim as facade
+    facade.sim_engine.current_task_frame.emit("z", Accumulator.SetValue(value))
+    facade.sim_engine.current_task_frame.emit("z", Accumulator.SetRate(rate))
+
+
+def read_and_await_condition(model):
+    z = model.z.get()
+    yield AwaitCondition(model.z >= 100)
+    model.x.set(-2)
+
+
 class Model:
     def __init__(self):
         self.x = Register("x", 55)
@@ -278,6 +290,8 @@ class Model:
             call_then_read,
             spawns_anonymous_task,
             no_op,
-            condition_becomes_true_with_no_steps
+            condition_becomes_true_with_no_steps,
+            set_z,
+            read_and_await_condition
         ]
         return {x.__name__: x for x in activity_types}

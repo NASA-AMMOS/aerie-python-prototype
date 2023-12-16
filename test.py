@@ -729,6 +729,33 @@ def test_spawns_anonymous_subtask():
         # "call_then_read": error_on_rerun("call_then_read")},
     )
 
+def test_tricky_condition():
+    """
+    Test case: Task reads value of z (it's 20), and awaits condition for z to be >= 100
+
+    Task is scheduled to start at 10
+
+    Sim 1: Z starts out at 0 with slope of 2
+    Sim 2: Z starts out at 10 with slope of 1
+    """
+    incremental_sim_test_case(
+        Plan(
+            [
+                Directive("set_z", 0, {"rate": 2, "value": 0}),
+                Directive("read_and_await_condition", 10, {})
+            ]
+        ),
+        Plan(
+            [
+                Directive("set_z", 0, {"rate": 1, "value": 10}),
+                Directive("read_and_await_condition", 10, {})
+            ]
+        ),
+        {"read_and_await_condition": error_on_rerun("read_and_await_condition")}
+        # "call_then_read": error_on_rerun("call_then_read")},
+    )
+
+
 
 """
 TODO test case: await condition when Z passed through the interval of interest between two simulation steps
