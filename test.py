@@ -2,8 +2,8 @@ import inspect
 
 import engine as sim
 # import incremental_engine as incremental_sim
-# import replaying_engine as incremental_sim
-import minimally_replaying_engine as incremental_sim
+import replaying_engine as incremental_sim
+# import minimally_replaying_engine as incremental_sim
 import model
 import sim as facade
 from protocol import Plan, Directive, hashable_directive, make_generator
@@ -30,6 +30,7 @@ def run_baseline(sim):
                 Directive("caller_activity", 50, {}),
                 Directive("emit_event", 99, {"topic": "y", "value": 2, "_": 1}),
                 Directive("await_condition_set_by_child", 100, {"_": 2}),
+                Directive("condition_becomes_true_with_no_steps", 101, {})
             ]
         ),
     )
@@ -44,6 +45,8 @@ def run_baseline(sim):
         (50, "x=100;x=99;x=98"),
         (99, "y=2"),
         (100, "x=9;x=10;x=11"),
+        (101, 'x=101'),
+        (200, 'x=200')
     ]
 
     assert spans == [
@@ -55,13 +58,14 @@ def run_baseline(sim):
         (Directive(type="caller_activity", start_time=50, args={}), 50, 50),
         (Directive(type='emit_event', start_time=99, args={'topic': 'y', 'value': 2, '_': 1}), 99, 99),
         (Directive(type='maybe_delay_then_emit', start_time=100, args={'_': 2}), 100, 103),
-        (Directive(type='await_condition_set_by_child', start_time=100, args={'_': 2}), 100, 105)
+        (Directive(type='await_condition_set_by_child', start_time=100, args={'_': 2}), 100, 105),
+        (Directive(type='condition_becomes_true_with_no_steps', start_time=101, args={}), 101, 200),
     ]
 
     assert compute_profiles(model.Model(), sim_events) == {
-        "x": [(0, 55), (20, 50), (25, 55), (30, 60), (35, 55), (40, 57), (41, 55), (50, 98), (99, 98), (100, 11)],
-        "y": [(0, 0), (20, 0), (25, 0), (30, 10), (35, 3.0), (40, 13), (41, 10), (50, 10), (99, 2), (100, 2)],
-        "z": [(0, 0), (20, 20), (25, 25), (30, 30), (35, 35), (40, 40), (41, 41), (50, 50), (99, 99), (100, 100)],
+        "x": [(0, 55), (20, 50), (25, 55), (30, 60), (35, 55), (40, 57), (41, 55), (50, 98), (99, 98), (100, 11), (101, 101), (200, 200)],
+        "y": [(0, 0), (20, 0), (25, 0), (30, 10), (35, 3.0), (40, 13), (41, 10), (50, 10), (99, 2), (100, 2), (101, 2), (200, 2)],
+        "z": [(0, 0), (20, 20), (25, 25), (30, 30), (35, 35), (40, 40), (41, 41), (50, 50), (99, 99), (100, 100), (101, 101), (200, 200)],
     }
 
 

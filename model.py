@@ -232,6 +232,12 @@ def no_op(model):
     pass
 
 
+def condition_becomes_true_with_no_steps(model):
+    model.x.set(model.z.get())
+    yield AwaitCondition(model.z >= 200)
+    model.x.set(model.z.get())
+
+
 class Model:
     def __init__(self):
         self.x = Register("x", 55)
@@ -271,6 +277,7 @@ class Model:
             await_y_greater_than,
             call_then_read,
             spawns_anonymous_task,
-            no_op
+            no_op,
+            condition_becomes_true_with_no_steps
         ]
         return {x.__name__: x for x in activity_types}

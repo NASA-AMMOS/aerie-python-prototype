@@ -145,6 +145,8 @@ class JobSchedule:
         self._schedule = {}
 
     def schedule(self, start_offset, task):
+        if type(start_offset) is not int:
+            raise ValueError("start_offset must be an int. Received: " + start_offset)
         if not start_offset in self._schedule:
             self._schedule[start_offset] = []
         for _, batch in self._schedule.items():
@@ -190,8 +192,9 @@ def simulate(register_engine, model_class, plan):
         while old_awaiting_conditions:
             condition, task = old_awaiting_conditions.pop()
             engine.current_task_frame = TaskFrame(engine.elapsed_time, history=engine.events)
-            if condition():
-                engine.schedule.schedule(engine.elapsed_time, task)
+            time_to_wake_task = condition(True, 0, 9999)
+            if time_to_wake_task is not None:
+                engine.schedule.schedule(engine.elapsed_time + time_to_wake_task, task)  # All our times are integers here
             else:
                 engine.awaiting_conditions.append((condition, task))
     return sorted(engine.spans, key=lambda x: (x[1], x[2])), list(engine.events), None  # Third item is "payload", unused.

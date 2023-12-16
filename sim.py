@@ -38,20 +38,26 @@ class Register:
         return self.get() - other
 
     def __gt__(self, other):
-        def condition():
-            return self.get() > other
+        def condition(positive, at_earliest, at_latest):
+            if (self.get() > other) == positive:
+                return at_earliest
+            return None
 
         return condition
 
     def is_equal_to(self, other):
-        def condition():
-            return self.get() == other
+        def condition(positive, at_earliest, at_latest):
+            if (self.get() == other) == positive:
+                return at_earliest
+            return None
 
         return condition
 
     def __lt__(self, other):
-        def condition():
-            return self.get() < other
+        def condition(positive, at_earliest, at_latest):
+            if (self.get() < other) == positive:
+                return at_earliest
+            return None
 
         return condition
 
@@ -66,7 +72,8 @@ class Accumulator:
         self._initial_rate = rate
 
     def get(self):
-        return sim_engine.current_task_frame.read(self._topic, self.function)
+        value, rate = sim_engine.current_task_frame.read(self._topic, self.function)
+        return value
 
     def function(self, history):
         value = self._initial_value
@@ -81,7 +88,18 @@ class Accumulator:
                 if type(event.value) == Accumulator.SetRate:
                     rate = event.value.new_rate
         value += rate * (sim_engine.elapsed_time - previous_event_time)
-        return value
+        return value, rate
+
+    def __ge__(self, other):
+        def condition(positive, at_earliest, at_latest):
+            value, rate = sim_engine.current_task_frame.read(self._topic, self.function)
+            time_until_intersection = int((other - value) / rate)
+            if time_until_intersection > at_latest:
+                return None
+            if time_until_intersection < at_earliest:
+                return at_earliest
+            return time_until_intersection
+        return condition
 
     def __repr__(self):
         return f"{self._topic}, {self.get()}"

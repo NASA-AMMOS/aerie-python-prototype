@@ -11,7 +11,7 @@ Profile = namedtuple("Profile", "name segments")
 Segment = namedtuple("Segment", "start_time value")
 
 Delay = namedtuple("Delay", "duration")
-AwaitCondition = namedtuple("AwaitCondition", "condition")
+AwaitCondition = namedtuple("AwaitCondition", "condition")  # condition is a function from (positive, at_earliest, at_latest) -> Optional[Duration]
 Call = namedtuple("Call", "child_task args")
 Spawn = namedtuple("Spawn", "child_task")
 Completed = namedtuple("Completed", "")
