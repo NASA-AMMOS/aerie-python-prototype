@@ -43,6 +43,10 @@ def fresh_anonymous_task_name(label=""):
     __task_id_counter += 1
     return f"ANONYMOUS({__task_id_counter}){' ' + label if label != '' else ''}"
 
+#############################################
+#           Simulation Engine               #
+#############################################
+
 class SimulationEngine:
     def __init__(self, register_engine, action_log=None, anonymous_tasks=None):
         self.action_log = ActionLog(self, action_log)
@@ -66,17 +70,26 @@ class SimulationEngine:
         self.imitating_tasks = {}
 
     def register_model(self, cls):
+        """
+        Instantiate the model, save, and return that instance
+        """
         self.model = cls()
         self.activity_types_by_name = self.model.get_activity_types()
         return self.model
 
     def spawn(self, directive_type, arguments):
+        """
+        Spawn a task, and step it once, recording its actions.
+        From then on, that task is just like any other task - only its first step gets special treatment, since it
+        needs to be grafted into the current event graph
+        """
         self.current_task_frame.action_log.spawn(self.current_task_frame.task_id, directive_type, arguments)
         task_id = fresh_task_id(str(directive_type) + " " + str(arguments))
         self.task_start_times[task_id] = self.elapsed_time
         self.task_directives[task_id] = Directive(directive_type, self.elapsed_time, arguments)
         self.make_task(task_id, directive_type, arguments)
 
+        # make_task will put this task in either self.tasks or self.imitating_tasks, depending on whether we've seen this task before
         if task_id in self.tasks:
             self.step_child_task(task_id, self.tasks[task_id])
         else:
@@ -84,6 +97,9 @@ class SimulationEngine:
         return task_id
 
     def spawn_anonymous(self, task_factory):
+        """
+        Spawn a task
+        """
         task = task_factory()
         task_id = fresh_task_id(repr(task))
         task_name = fresh_anonymous_task_name()
@@ -120,44 +136,52 @@ class SimulationEngine:
         caller saves current_task_frame
         """
         self.current_task_frame = TaskFrame(self.elapsed_time, self.action_log, task_id=task_id, history=self.current_task_frame.get_visible_history())
+
         try:
             task_status = next(task)
         except StopIteration:
             task_status = Completed()
-        if type(task_status) == Delay:
-            self.schedule.schedule(self.elapsed_time + task_status.duration, task_id)
-        elif type(task_status) == AwaitCondition:
-            self.awaiting_conditions.append((task_status.condition, task_id))
-        elif type(task_status) == Completed:
-            self.spans.append(
-                (
-                    self.task_directives.get(
-                        task_id, (self.task_inputs[task_id][0], self.task_inputs[task_id][1])
-                    ),
-                    self.task_start_times[task_id],
-                    self.elapsed_time,
-                )
-            )
-            if task_id in self.awaiting_tasks:
-                self.schedule.schedule(self.elapsed_time, self.awaiting_tasks[task_id])
-                del self.awaiting_tasks[task_id]
-        elif type(task_status) == Call:
-            child_task_id = fresh_task_id(repr((task_status.child_task, task_status.args)))
-            self.awaiting_tasks[child_task_id] = task_id
-            self.task_directives[child_task_id] = Directive(task_status.child_task, self.elapsed_time, task_status.args)
-            self.task_start_times[child_task_id] = self.elapsed_time
 
-            self.make_task(child_task_id, task_status.child_task, task_status.args)
-            if child_task_id in self.tasks:
-                self.step_child_task(child_task_id, self.tasks[child_task_id])
-            else:
-                self.step_imitating_task(child_task_id)
-        else:
-            raise ValueError("Unhandled task status: " + str(task_status))
         self.action_log.yield_(task_id, task_status)
+
+        match task_status:
+            case Delay(duration):
+                self.schedule.schedule(self.elapsed_time + duration, task_id)
+            case AwaitCondition(condition):
+                self.awaiting_conditions.append((condition, task_id))
+            case Completed():
+                self.spans.append(
+                    (
+                        self.task_directives.get(
+                            task_id, (self.task_inputs[task_id][0], self.task_inputs[task_id][1])
+                        ),
+                        self.task_start_times[task_id],
+                        self.elapsed_time,
+                    )
+                )
+                if task_id in self.awaiting_tasks:
+                    self.schedule.schedule(self.elapsed_time, self.awaiting_tasks[task_id])
+                    del self.awaiting_tasks[task_id]
+            case Call(child_task, args):
+                child_task_id = fresh_task_id(repr((child_task, args)))
+                self.awaiting_tasks[child_task_id] = task_id
+                self.task_directives[child_task_id] = Directive(child_task, self.elapsed_time, args)
+                self.task_start_times[child_task_id] = self.elapsed_time
+
+                self.make_task(child_task_id, child_task, args)
+                if child_task_id in self.tasks:
+                    self.step_child_task(child_task_id, self.tasks[child_task_id])
+                else:
+                    self.step_imitating_task(child_task_id)
+            case _:
+                raise ValueError("Unhandled task status: " + str(task_status))
+
         return task_status, self.current_task_frame.collect()
 
     def make_task(self, task_id, directive_type, args):
+        """
+        Adds task_id to either self.tasks or self.imitating_tasks, depending on whether we know anything about this task
+        """
         self.task_inputs[task_id] = (directive_type, args)
         if self.action_log.contains_key(directive_type, args):
             self.imitating_tasks[task_id] = task_replayer(self, task_id, directive_type, args, self.action_log.get(directive_type, args), self.register_engine)
@@ -495,6 +519,7 @@ def task_replayer(engine: SimulationEngine, task_id, directive_type, args, actio
                     action_log = branch
                     break
                 else:
+                    # Cache miss! Time to step up the task, patch it into the engine, and then yield its next status.
                     engine.tasks[task_id] = step_up_task(register_engine, engine, directive_type, args, processed_reads, new_res)
                     yield next(engine.tasks[task_id])
                     return
@@ -503,6 +528,16 @@ def task_replayer(engine: SimulationEngine, task_id, directive_type, args, actio
 
 
 def step_up_task(register_engine, engine, directive_type, arguments, reads, last_read):
+    """
+    Conjures a given task in the requested state. Calling `next()` will yield its next task status.
+
+    In detail, calling next will do the following:
+    1. Register a dummy simulation engine globally
+    2. Run the given directive_type and args, ignoring any emits or spawns. Reads are fed from the `reads` parameter
+    3. When the reads have been exhausted, re-register the real simulation engine, and yield the next task status
+
+    During step 3, any emits and spawns are processed by the real simulation engine
+    """
     if directive_type in engine.anonymous_tasks:
         task = engine.anonymous_tasks[directive_type]()
     else:
