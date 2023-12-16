@@ -2,8 +2,8 @@ import inspect
 
 import engine as sim
 # import incremental_engine as incremental_sim
-import replaying_engine as incremental_sim
-# import minimally_replaying_engine as incremental_sim
+# import replaying_engine as incremental_sim
+import minimally_replaying_engine as incremental_sim
 import model
 import sim as facade
 from protocol import Plan, Directive, hashable_directive, make_generator
