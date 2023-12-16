@@ -63,6 +63,7 @@ class SimulationEngine:
         if anonymous_tasks is None:
             anonymous_tasks = {}
         self.anonymous_tasks = anonymous_tasks
+        self.imitating_tasks = {}
 
     def register_model(self, cls):
         self.model = cls()
@@ -76,7 +77,10 @@ class SimulationEngine:
         self.task_directives[task_id] = Directive(directive_type, self.elapsed_time, arguments)
         self.make_task(task_id, directive_type, arguments)
 
-        self.step_child_task(task_id, self.tasks[task_id])
+        if task_id in self.tasks:
+            self.step_child_task(task_id, self.tasks[task_id])
+        else:
+            self.step_imitating_task(task_id)
         return task_id
 
     def spawn_anonymous(self, task_factory):
@@ -98,14 +102,15 @@ class SimulationEngine:
         parent_task_frame.record_spawned_child(events)
         self.current_task_frame = parent_task_frame
 
+    def step_imitating_task(self, task_id):
+        self.step_child_task(task_id, self.imitating_tasks[task_id])
+
     def defer(self, directive_type, duration, arguments):
         task_id = fresh_task_id(repr((directive_type, arguments)))
         self.schedule.schedule(self.elapsed_time + duration, task_id)
         self.task_directives[task_id] = Directive(directive_type, self.elapsed_time + duration, arguments)
         self.task_start_times[task_id] = self.elapsed_time + duration
         self.make_task(task_id, directive_type, arguments)
-
-        return task_id, self.tasks[task_id]
 
     def step(self, task_id, task):
         self.current_task_frame = TaskFrame(self.elapsed_time, self.action_log, task_id=task_id, history=self.current_task_frame.get_visible_history())
@@ -137,7 +142,10 @@ class SimulationEngine:
             self.task_start_times[child_task_id] = self.elapsed_time
 
             self.make_task(child_task_id, task_status.child_task, task_status.args)
-            self.step_child_task(child_task_id, self.tasks[child_task_id])
+            if child_task_id in self.tasks:
+                self.step_child_task(child_task_id, self.tasks[child_task_id])
+            else:
+                self.step_imitating_task(child_task_id)
         else:
             raise ValueError("Unhandled task status: " + str(task_status))
         self.action_log.yield_(task_id, task_status)
@@ -146,7 +154,7 @@ class SimulationEngine:
     def make_task(self, task_id, directive_type, args):
         self.task_inputs[task_id] = (directive_type, args)
         if self.action_log.contains_key(directive_type, args):
-            self.tasks[task_id] = task_replayer(self, directive_type, args, self.action_log.get(directive_type, args), Doppelganger(self.action_log, self.register_engine), self.register_engine)
+            self.imitating_tasks[task_id] = task_replayer(self, task_id, directive_type, args, self.action_log.get(directive_type, args), self.register_engine)
         elif directive_type in self.anonymous_tasks:  # oxymoron
             self.tasks[task_id] = self.anonymous_tasks[directive_type]()
         else:
@@ -299,7 +307,11 @@ def simulate(register_engine, model_class, plan, action_log=None, anonymous_task
         engine.elapsed_time = resume_time
         batch_event_graph = EventGraph.empty()
         for task_id in engine.schedule.get_next_batch():
-            task_status, event_graph = engine.step(task_id, engine.tasks[task_id])
+            if task_id in engine.tasks:
+                task_status, event_graph = engine.step(task_id, engine.tasks[task_id])
+            else:
+                engine.step_imitating_task(task_id)
+                event_graph = engine.current_task_frame.collect()
             batch_event_graph = EventGraph.concurrently(batch_event_graph, event_graph)
         if type(batch_event_graph) != EventGraph.Empty:
             if engine.events and engine.events[-1][0] == engine.elapsed_time:
@@ -324,26 +336,27 @@ def simulate(register_engine, model_class, plan, action_log=None, anonymous_task
 
 
 RBT_Empty = namedtuple("RBT_Empty", "")
-RBT_NonRead = namedtuple("RBT_NonRead", "payload rest")
+RBT_NonRead = namedtuple("RBT_NonRead", "actions event_graph rest")
 RBT_Read = namedtuple("RBT_Read", "topics function branches")
 
 
 def make_rbt(actions, accumulator=None):
+    event_graph = None
     if accumulator is None: accumulator = []
     if not actions:
         if accumulator:
-            return RBT_NonRead(accumulator, RBT_Empty())
+            return RBT_NonRead(accumulator, event_graph, RBT_Empty())
         else:
             return RBT_Empty()
     (action, *action_args), *rest = actions
     if action == "read":
         topics, function, res = action_args
         if accumulator:
-            return RBT_NonRead(accumulator, RBT_Read(topics, function, ((res, make_rbt(rest)),)))
+            return RBT_NonRead(accumulator, event_graph, RBT_Read(topics, function, ((res, make_rbt(rest)),)))
         else:
             return RBT_Read(topics, function, ((res, make_rbt(rest)),))
     elif action == "yield":
-        return RBT_NonRead(accumulator + [(action, *action_args)], make_rbt(rest))
+        return RBT_NonRead(accumulator + [(action, *action_args)], event_graph, make_rbt(rest))
     else:
         return make_rbt(rest, accumulator + [(action, *action_args)])
 
@@ -356,6 +369,7 @@ def extend(rbt, actions):
 
     nonreads = []
     actions = list(actions)
+    event_graph = None
     while actions:
         action = actions.pop(0)
         if action[0] == "read":
@@ -363,13 +377,13 @@ def extend(rbt, actions):
             break
         elif action[0] == "yield":
             nonreads.append(action)
-            return RBT_NonRead(nonreads, extend(rbt.rest, actions))
+            return RBT_NonRead(nonreads, event_graph, extend(rbt.rest, actions))
         else:
             nonreads.append(action)
 
     if nonreads:
         assert type(rbt) == RBT_NonRead
-        return RBT_NonRead(nonreads, extend(rbt.rest, actions))
+        return RBT_NonRead(nonreads, event_graph, extend(rbt.rest, actions))
 
     if actions:
         assert type(rbt) == RBT_Read
@@ -396,56 +410,34 @@ def extend(rbt, actions):
 
     else:
         assert type(rbt) == RBT_NonRead
-        return RBT_NonRead(first, extend(rbt.rest, rest))
+        return RBT_NonRead(first, event_graph, extend(rbt.rest, rest))
+
+
+def make_event_graph(actions, action_log):
+    event_graph = EventGraph.empty()
+    for action, *action_args in reversed(actions):
+        if action == "emit":
+            topic, value = action_args
+            event_graph = EventGraph.sequentially(EventGraph.atom(Event(topic, value)), event_graph)
+        elif action == "spawn":
+            child_directive_type, arguments = action_args
+            # TODO
+            event_graph = EventGraph.concurrently(event_graph, make_event_graph(action_log["child_directive_type"], action_log))
+
+
 
 
 def simulate_incremental(register_engine, model_class, new_plan, old_plan, payload):
     return simulate(register_engine, model_class, new_plan, action_log=payload["action_log"], anonymous_tasks=payload["anonymous_tasks"])
 
 
-class Doppelganger:
-    def __init__(self, action_log, register_engine):
-        self.action_log = action_log
-        self.register_engine = register_engine
-
-    def imitate(self, engine, directive):
-        action_log = self.action_log.get(directive.type, directive.args)
-        if action_log is not None:
-            task_id = fresh_task_id(repr(directive))
-            task = task_replayer(engine, directive, action_log, self, self.register_engine)
-            engine.schedule.schedule(engine.elapsed_time + directive.start_time, task_id)
-            engine.task_start_times[task_id] = engine.elapsed_time + directive.start_time
-            engine.task_inputs[task_id] = (directive.type, directive.args)
-            engine.task_directives[task_id] = directive
-            engine.tasks[task_id] = task
-            return task_id
-        else:
-            return engine.defer(directive.type, directive.start_time, directive.args)
-
-    def imitate_spawn(self, engine, directive_type, arguments):
-        action_log = self.action_log.get(directive_type, arguments)
-        if action_log is not None:
-            task_id = fresh_task_id(repr((directive_type, arguments)))
-            task = task_replayer(engine, directive_type, arguments, action_log, self, self.register_engine)
-            engine.current_task_frame.action_log.spawn(engine.current_task_frame.task_id, directive_type, arguments)
-            engine.tasks[task_id] = task
-            engine.task_inputs[task_id] = (directive_type, arguments)
-            engine.task_directives[task_id] = Directive(directive_type, engine.elapsed_time, arguments)
-            engine.task_start_times[task_id] = engine.elapsed_time
-            parent_task_frame = engine.current_task_frame
-            task_status, events = engine.step(task_id, task)
-            parent_task_frame.record_spawned_child(events)
-            engine.current_task_frame = parent_task_frame
-            return task_id
-        else:
-            return engine.spawn(directive_type, arguments)
-
-def task_replayer(engine: SimulationEngine, directive_type, args, action_log, imitator, register_engine):
+def task_replayer(engine: SimulationEngine, task_id, directive_type, args, action_log, register_engine):
     processed_reads = []
-    # TODO use python's newfangled match
-    while type(action_log) != RBT_Empty:
+    while True:
         match action_log:
-            case RBT_NonRead(entries, rest):
+            case RBT_Empty():
+                break
+            case RBT_NonRead(entries, event_graph, rest):
                 for entry in entries:
                     action, *action_args = entry
                     if action == "emit":
@@ -456,7 +448,7 @@ def task_replayer(engine: SimulationEngine, directive_type, args, action_log, im
                         yield task_status
                     elif action == "spawn":
                         child_directive_type, arguments = action_args
-                        imitator.imitate_spawn(engine, child_directive_type, arguments)
+                        engine.spawn(child_directive_type, arguments)
                     else:
                         raise RuntimeError("Unhandled action type: " + action)
                     action_log = rest
@@ -468,8 +460,8 @@ def task_replayer(engine: SimulationEngine, directive_type, args, action_log, im
                     action_log = branch
                     break
                 else:
-                    # TODO: yield from instead of yield without resume
-                    yield from step_up_task(register_engine, engine, directive_type, args, processed_reads, new_res)
+                    engine.tasks[task_id] = step_up_task(register_engine, engine, directive_type, args, processed_reads, new_res)
+                    yield next(engine.tasks[task_id])
                     return
             case _:
                 raise RuntimeError("Unhandled action log type: " + str(type(action_log)))
